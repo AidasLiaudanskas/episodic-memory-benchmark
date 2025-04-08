@@ -225,6 +225,45 @@ def extract_chapter_number(s):
     else:
         raise ValueError("String does not match the expected format")
 
+def process_single_evaluation(q, df_qa2, nb_chapters, nb_tokens, data_folder, prompt_parameters, 
+                             model_parameters, book_parameters, answering_parameters, split_chapters, 
+                             env_file):
+    model_name = model_parameters['model_name']
+    config = SettingsWrapper(_env_file = env_file)
+    
+    evaluate_filepath = evaluate_filepath_func(q, nb_chapters, nb_tokens, data_folder, prompt_parameters, model_parameters, book_parameters, answering_parameters)
+    
+    if not evaluate_filepath.is_file():
+        question = df_qa2.iloc[q]['question'] # just for the printing
+        llm_answer = df_qa2.iloc[q]['llm_answer']
+        correct_answer = df_qa2.iloc[q]['correct_answer']
+        retrieval_type = df_qa2.iloc[q]['retrieval_type']
+        get_style = df_qa2.iloc[q]['get']
+        
+        with print_lock:
+            print(f"Evaluate {str(q)} / {str(len(df_qa2)-1)} [question {question}]")
+        
+        # Initialize model for this worker
+        my_model = ModelsWrapper(model_name, config)
+
+        # update the answer for full events
+        if len(correct_answer) == 1:
+            if is_valid_chapter_string(correct_answer[0]):
+                chapter_number = extract_chapter_number(correct_answer[0])
+                correct_answer_long = split_chapters[chapter_number] # does not need to be a list in this case
+            else:
+                correct_answer_long = None
+        else:
+            correct_answer_long = None
+
+        # generate the content
+        out = evaluate_answer(llm_answer, correct_answer, retrieval_type, my_model, correct_answer_long, get_style)
+        evaluate_filepath.parent.mkdir(parents=True, exist_ok=True)
+        export_list(out, evaluate_filepath)
+    
+    generated_evaluation = import_list(evaluate_filepath)
+    return generated_evaluation
+
 def generate_evaluation_func(
     my_benchmark: BenchmarkGenerationWrapper,
     df_generated_answers,
@@ -256,49 +295,42 @@ def generate_evaluation_func(
 
     # question/true answer and additionally containing the generated answers
     df_qa2 = df_generated_answers
-    generated_evaluations = []
-
-    # loop
-    for q in range(len(df_qa2)):
-        evaluate_filepath = evaluate_filepath_func(q, nb_chapters, nb_tokens, data_folder, prompt_parameters, model_parameters, book_parameters, answering_parameters)
-        if not evaluate_filepath.is_file():
-            question = df_qa2.iloc[q]['question'] # just for the printing
-            llm_answer = df_qa2.iloc[q]['llm_answer']
-            correct_answer = df_qa2.iloc[q]['correct_answer']
-            retrieval_type = df_qa2.iloc[q]['retrieval_type']
-            get_style = df_qa2.iloc[q]['get']
-            print(f"Evaluate {str(q)} / {str(len(df_qa2)-1)} [question {question}]")
-            # only initialize the model if needed, and only initialize it once 
+    
+    # Create a lock for thread-safe printing
+    global print_lock
+    print_lock = threading.Lock()
+    
+    # Create a partial function with fixed parameters
+    process_func = partial(
+        process_single_evaluation,
+        df_qa2=df_qa2,
+        nb_chapters=nb_chapters,
+        nb_tokens=nb_tokens,
+        data_folder=data_folder,
+        prompt_parameters=prompt_parameters,
+        model_parameters=model_parameters,
+        book_parameters=book_parameters,
+        answering_parameters=answering_parameters,
+        split_chapters=split_chapters,
+        env_file=env_file
+    )
+    
+    # Run with parallel workers
+    generated_evaluations = [None] * len(df_qa2)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        # Submit all tasks
+        future_to_index = {executor.submit(process_func, q): q for q in range(len(df_qa2))}
+        
+        # Process results as they complete
+        for future in concurrent.futures.as_completed(future_to_index):
+            q = future_to_index[future]
             try:
-                my_model
-            except NameError:
-                my_model = ModelsWrapper(model_name, config)
-
-            # update the answer for full events
-            if len(correct_answer) == 1:
-                #print(correct_answer[0])
-                if is_valid_chapter_string(correct_answer[0]):
-                    #print('need to change with actual chapter')
-                    chapter_number = extract_chapter_number(correct_answer[0])
-                    #print(chapter_number)
-                    correct_answer_long = split_chapters[chapter_number] # does not need to be a list in this case
-                    #print("[begin book chapter]")
-                    #print(correct_answer_long)
-                    #print("[end book chapter]")
-                else:
-                    correct_answer_long = None
-            else:
-                correct_answer_long = None
-
-            # generate the content
-            out = evaluate_answer(llm_answer, correct_answer, retrieval_type, my_model, correct_answer_long, get_style)
-            evaluate_filepath.parent.mkdir(parents=True, exist_ok=True)
-            #print(evaluate_filepath)
-            export_list(out, evaluate_filepath)
-        generated_evaluation = import_list(evaluate_filepath)
-        generated_evaluations.append(generated_evaluation)
-
-    #df_generated_answers = pd.concat([df_qa2, pd.DataFrame({'llm_answer':generated_answers})], axis = 1)
+                generated_evaluations[q] = future.result()
+            except Exception as exc:
+                with print_lock:
+                    print(f'Evaluation {q} generated an exception: {exc}')
+                # Fallback to sequential processing if parallel fails for this item
+                generated_evaluations[q] = process_func(q)
         
     df_generated_evaluations = pd.DataFrame(generated_evaluations)
     df_generated_evaluations = pd.concat([df_qa2, df_generated_evaluations], axis = 1)
