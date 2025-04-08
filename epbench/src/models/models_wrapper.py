@@ -4,6 +4,7 @@ import json
 class ModelsWrapper:
     def __init__(self, model_name = "gpt-4o-mini-2024-07-18", config = {}):           
         assert model_name is not None, f"model_name is required, got: {model_name}"
+        print("Using model: ", model_name)
         self.model_name = model_name
         if ("gpt-4o" in model_name) or ("o1" in model_name) or ("o3" in model_name):
             from openai import OpenAI
@@ -28,8 +29,8 @@ class ModelsWrapper:
         elif "gemini" in model_name:
             from epbench.src.models.misc import no_ssl_verification
             no_ssl_verification()
-            from google import genai
-            self.client = genai.Client(api_key=config.GOOGLE_API_KEY)
+            self.client = None # instead using the OpenRouter API directly
+            self.key = config.OPENROUTER_API_KEY
         elif ("llama" in model_name):
             from epbench.src.models.misc import no_ssl_verification
             no_ssl_verification()
@@ -102,17 +103,27 @@ class ModelsWrapper:
                 outputs = outputs.content[0].text
 
         elif "gemini" in self.model_name:
-            outputs = self.client.models.generate_content(
-                model=self.model_name,
-                # system prompt omitted
-                contents=user_prompt
+            outputs = requests.post(
+                url="https://openrouter.ai/api/v1/chat/completions",
+                headers={"Authorization": f"Bearer {self.key}"},
+                data=json.dumps({
+                    "model": "google/" + self.model_name,
+                    "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                    ],
+                }),
+                timeout=10  # Added timeout of 10 seconds
             )
-
+            
             if not full_outputs:
-                # note: reasoning steps not available, according to documentation (Feb 2025)
-                # "The Flash Thinking model is an experimental model and has the following limitations:
-                # Thoughts are only shown in Google AI Studio"
-                outputs = outputs.text
+                raw_string = outputs.text
+                cleaned_string = raw_string.strip()
+                print(cleaned_string)
+                parsed_dict = json.loads(cleaned_string)
+                if not 'choices' in parsed_dict:
+                    print(parsed_dict)
+                outputs = parsed_dict['choices'][0]['message']['content']
         
         elif "llama" in self.model_name:
             outputs = requests.post(
