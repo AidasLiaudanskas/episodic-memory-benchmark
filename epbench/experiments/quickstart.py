@@ -1,6 +1,8 @@
 # Default file paths to the data folder and the environment variable
 from pathlib import Path
-git_repo_filepath = '/filepath/to/gitrepo/episodic-memory-benchmark'
+from epbench.src.models.settings_wrapper import SettingsWrapper
+config = SettingsWrapper()
+git_repo_filepath = config.env["REPO_PATH"]
 data_folder = Path(git_repo_filepath) / 'epbench' / 'data'
 env_file = Path(git_repo_filepath) / '.env'
 
@@ -41,7 +43,7 @@ prompt_parameters = {
     }
   }
 model_parameters = {
-  'model_name': 'claude-3-5-sonnet-20240620', 
+  'model_name': 'claude-3-5-sonnet-20240620',
   'max_new_tokens': 4096, 
   'itermax': 10
   }
