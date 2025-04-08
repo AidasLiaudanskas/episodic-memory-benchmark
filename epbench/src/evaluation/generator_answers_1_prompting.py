@@ -161,6 +161,7 @@ def generate_answers_func(
     sleeping_time = answering_parameters['sleeping_time']
     
     config = SettingsWrapper(_env_file = env_file)
+    max_workers = config.MAX_WORKERS  # Get max_workers from settings
 
     book = my_benchmark.get_book()
     if answering_parameters['model_name'] == 'llama-3.1-405b-instruct':
@@ -196,7 +197,7 @@ def generate_answers_func(
     
     # Run with parallel workers
     generated_answers = [None] * len(df_qa)
-    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         # Submit all tasks
         future_to_index = {executor.submit(process_func, q): q for q in range(len(df_qa))}
         
@@ -279,6 +280,7 @@ def generate_evaluation_func(
     model_name = model_parameters['model_name'] # using the model that built the benchmark, not the one answering the questions
     
     config = SettingsWrapper(_env_file = env_file)
+    max_workers = config.MAX_WORKERS  # Get max_workers from settings
 
     nb_chapters = my_benchmark.nb_chapters()
     nb_tokens = my_benchmark.nb_tokens()
@@ -317,7 +319,7 @@ def generate_evaluation_func(
     
     # Run with parallel workers
     generated_evaluations = [None] * len(df_qa2)
-    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         # Submit all tasks
         future_to_index = {executor.submit(process_func, q): q for q in range(len(df_qa2))}
         
@@ -382,6 +384,7 @@ def generate_chronological_func(
     model_name = model_parameters['model_name'] # using the model that built the benchmark, not the one answering the questions
     
     config = SettingsWrapper(_env_file = env_file)
+    max_workers = config.MAX_WORKERS  # Get max_workers from settings
 
     nb_chapters = my_benchmark.nb_chapters()
     nb_tokens = my_benchmark.nb_tokens()
@@ -414,7 +417,7 @@ def generate_chronological_func(
     
     # Run with parallel workers
     generated_chronologicals = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         # Submit only chronological tasks
         future_to_index = {executor.submit(process_func, q): q for q in chronological_indices}
         
