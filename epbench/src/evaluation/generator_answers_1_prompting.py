@@ -337,6 +337,36 @@ def generate_evaluation_func(
 
     return df_generated_evaluations
 
+def process_single_chronological(q, df_qa3, nb_chapters, nb_tokens, data_folder, prompt_parameters, 
+                                model_parameters, book_parameters, answering_parameters, env_file):
+    model_name = model_parameters['model_name']
+    config = SettingsWrapper(_env_file = env_file)
+    
+    if df_qa3.iloc[q]['get'] != 'chronological':
+        return None  # Skip non-chronological items
+        
+    chronological_filepath = chronological_filepath_func(q, nb_chapters, nb_tokens, data_folder, prompt_parameters, 
+                                                       model_parameters, book_parameters, answering_parameters)
+
+    if not chronological_filepath.is_file():
+        predicted_items = df_qa3.iloc[q]['predicted_items']
+        groundtruth_items = df_qa3.iloc[q]['groundtruth_items']
+        question = df_qa3.iloc[q]['question']
+        
+        with print_lock:
+            print(f"Evaluate {str(q)} / {str(len(df_qa3)-1)} [question {question}]")
+        
+        # Initialize model for this worker
+        my_model = ModelsWrapper(model_name, config)
+
+        # Generate the content
+        out = evaluate_chronological(groundtruth_items, predicted_items, my_model)
+        chronological_filepath.parent.mkdir(parents=True, exist_ok=True)
+        export_list(out, chronological_filepath)
+        
+    generated_chronological = import_list(chronological_filepath)
+    return generated_chronological
+
 def generate_chronological_func(
     my_benchmark: BenchmarkGenerationWrapper,
     df_generated_evaluations,
@@ -357,35 +387,52 @@ def generate_chronological_func(
     nb_tokens = my_benchmark.nb_tokens()
 
     df_qa3 = df_generated_evaluations
-
+    
+    # Create a lock for thread-safe printing
+    global print_lock
+    print_lock = threading.Lock()
+    
+    # Find chronological questions first
+    chronological_indices = [q for q in range(len(df_qa3)) if df_qa3.iloc[q]['get'] == 'chronological']
+    
+    if not chronological_indices:
+        return pd.DataFrame([])  # Return empty DataFrame if no chronological questions
+    
+    # Create a partial function with fixed parameters
+    process_func = partial(
+        process_single_chronological,
+        df_qa3=df_qa3,
+        nb_chapters=nb_chapters,
+        nb_tokens=nb_tokens,
+        data_folder=data_folder,
+        prompt_parameters=prompt_parameters,
+        model_parameters=model_parameters,
+        book_parameters=book_parameters,
+        answering_parameters=answering_parameters,
+        env_file=env_file
+    )
+    
+    # Run with parallel workers
     generated_chronologicals = []
-
-    # loop
-    for q in range(len(df_qa3)):
-        if df_qa3.iloc[q]['get'] == 'chronological': # only consider the chronological questions
-            chronological_filepath = chronological_filepath_func(q, nb_chapters, nb_tokens, data_folder, prompt_parameters, model_parameters, book_parameters, answering_parameters)
-
-            if not chronological_filepath.is_file():
-                predicted_items = df_qa3.iloc[q]['predicted_items']
-                groundtruth_items = df_qa3.iloc[q]['groundtruth_items']
-                question = df_qa3.iloc[q]['question'] # just for the printing
-                print(f"Evaluate {str(q)} / {str(len(df_qa3)-1)} [question {question}]")
-                # only initialize the model if needed, and only initialize it once 
-                try:
-                    my_model
-                except NameError:
-                    my_model = ModelsWrapper(model_name, config)
-
-                # generate the content
-                out = evaluate_chronological(groundtruth_items, predicted_items, my_model)
-                chronological_filepath.parent.mkdir(parents=True, exist_ok=True)
-                #print(evaluate_filepath)
-                export_list(out, chronological_filepath)
-            generated_chronological = import_list(chronological_filepath)
-            generated_chronologicals.append(generated_chronological)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        # Submit only chronological tasks
+        future_to_index = {executor.submit(process_func, q): q for q in chronological_indices}
+        
+        # Process results as they complete
+        for future in concurrent.futures.as_completed(future_to_index):
+            q = future_to_index[future]
+            try:
+                result = future.result()
+                generated_chronologicals.append(result)
+            except Exception as exc:
+                with print_lock:
+                    print(f'Chronological evaluation {q} generated an exception: {exc}')
+                # Fallback to sequential processing if parallel fails for this item
+                result = process_func(q)
+                if result is not None:
+                    generated_chronologicals.append(result)
 
     df_generated_chronological = pd.DataFrame(generated_chronologicals)
-
     return df_generated_chronological
 
 
