@@ -218,10 +218,11 @@ def generate_evaluation_func(
 
             # update the answer for full events
             if len(correct_answer) == 1:
-                #print(correct_answer[0])
-                if is_valid_chapter_string(correct_answer[0]):
+                # Convert set to list before indexing
+                correct_answer_list = list(correct_answer)
+                if is_valid_chapter_string(correct_answer_list[0]):
                     #print('need to change with actual chapter')
-                    chapter_number = extract_chapter_number(correct_answer[0])
+                    chapter_number = extract_chapter_number(correct_answer_list[0])
                     #print(chapter_number)
                     correct_answer_long = split_chapters[chapter_number] # does not need to be a list in this case
                     #print("[begin book chapter]")
