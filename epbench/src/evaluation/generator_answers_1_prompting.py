@@ -10,6 +10,9 @@ import os
 import pandas as pd
 import re
 import time
+import concurrent.futures
+from functools import partial
+import threading
 
 def check_and_remove(book, substring, error_if_not_found = True):
     count = book.count(substring)
@@ -83,6 +86,63 @@ def whether_do_this_q(q, q_max):
     else:
         return (q < q_max)
             
+def process_single_question(q, df_qa, book, nb_chapters, nb_tokens, data_folder, prompt_parameters, 
+                           model_parameters, book_parameters, answering_parameters, my_embedding, my_benchmark,
+                           env_file):
+    model_name = answering_parameters['model_name']
+    max_new_tokens = answering_parameters['max_new_tokens']
+    system_prompt = "You are an expert in memory tests."
+    sleeping_time = answering_parameters['sleeping_time']
+    
+    config = SettingsWrapper(_env_file = env_file)
+    
+    answer_filepath = answer_filepath_func(q, nb_chapters, nb_tokens, data_folder, prompt_parameters, model_parameters, book_parameters, answering_parameters)
+    answer_reasoning_filepath = answer_reasoning_filepath_func(q, nb_chapters, nb_tokens, data_folder, prompt_parameters, model_parameters, book_parameters, answering_parameters)
+    
+    if not answer_filepath.is_file():
+        question = df_qa.iloc[q]['question']
+        correct_answer = df_qa.iloc[q]['correct_answer']
+        print(f"Generate {str(q)} / {str(len(df_qa)-1)} [{correct_answer}for question {question}]")
+        
+        # Initialize model for this worker
+        my_model = ModelsWrapper(model_name, config)
+        
+        # generate the content
+        if answering_parameters['kind'] == 'prompting': # context, my_embedding is None
+            user_prompt = generate_episodic_memory_prompt(book, question)
+        elif answering_parameters['kind'] == 'rag': # rag, there is an embedding
+            user_prompt = query_message(question, my_embedding, answering_parameters, env_file)
+        elif answering_parameters['kind'] == 'ftuning':
+            user_prompt = my_benchmark.get_user_prompt_for_finetuning(question)
+            
+        if q == 0:
+            print("[begin example of a prompt]")
+            print(user_prompt)
+            print("[end example of a prompt]")
+            
+        out, reasoning = my_model.generate(user_prompt = user_prompt, system_prompt = system_prompt, max_new_tokens = max_new_tokens, keep_reasoning = True)
+        
+        # Use a thread lock for printing to avoid garbled output
+        with print_lock:
+            print(f"Sleeping for {sleeping_time} seconds for question {q}")
+        time.sleep(sleeping_time)
+        with print_lock:
+            print(f"Woke up from processing question {q}")
+        
+        answer_filepath.parent.mkdir(parents=True, exist_ok=True)
+        with print_lock:
+            print(answer_filepath)
+        export_list(out, answer_filepath)
+        
+        if reasoning is not None:
+            answer_reasoning_filepath.parent.mkdir(parents=True, exist_ok=True)
+            with print_lock:
+                print(answer_reasoning_filepath)
+            export_list(reasoning, answer_reasoning_filepath)
+    
+    generated_answer = import_list(answer_filepath)
+    return generated_answer
+
 def generate_answers_func(
     my_benchmark: BenchmarkGenerationWrapper,
     answering_parameters = {'kind': 'prompting', 'model_name': 'claude-3-5-sonnet-20240620', 'max_new_tokens': 4096, 'sleeping_time': 15},
@@ -113,44 +173,42 @@ def generate_answers_func(
     nb_chapters = my_benchmark.nb_chapters()
     nb_tokens = my_benchmark.nb_tokens()
 
-    # loop
-    generated_answers = []
-    for q in range(len(df_qa)):
-        answer_filepath = answer_filepath_func(q, nb_chapters, nb_tokens, data_folder, prompt_parameters, model_parameters, book_parameters, answering_parameters)
-        answer_reasoning_filepath = answer_reasoning_filepath_func(q, nb_chapters, nb_tokens, data_folder, prompt_parameters, model_parameters, book_parameters, answering_parameters)
-        if not answer_filepath.is_file():
-            question = df_qa.iloc[q]['question']
-            correct_answer = df_qa.iloc[q]['correct_answer']
-            print(f"Generate {str(q)} / {str(len(df_qa)-1)} [{correct_answer}for question {question}]")
-            # only initialize the model if needed, and only initialize it once 
+    # Create a lock for thread-safe printing
+    global print_lock
+    print_lock = threading.Lock()
+    
+    # Create a partial function with fixed parameters
+    process_func = partial(
+        process_single_question,
+        df_qa=df_qa,
+        book=book,
+        nb_chapters=nb_chapters,
+        nb_tokens=nb_tokens,
+        data_folder=data_folder,
+        prompt_parameters=prompt_parameters,
+        model_parameters=model_parameters,
+        book_parameters=book_parameters,
+        answering_parameters=answering_parameters,
+        my_embedding=my_embedding,
+        my_benchmark=my_benchmark,
+        env_file=env_file
+    )
+    
+    # Run with parallel workers
+    generated_answers = [None] * len(df_qa)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        # Submit all tasks
+        future_to_index = {executor.submit(process_func, q): q for q in range(len(df_qa))}
+        
+        # Process results as they complete
+        for future in concurrent.futures.as_completed(future_to_index):
+            q = future_to_index[future]
             try:
-                my_model
-            except NameError:
-                my_model = ModelsWrapper(model_name, config)
-            # generate the content
-            if answering_parameters['kind'] == 'prompting': # context, my_embedding is None
-                user_prompt = generate_episodic_memory_prompt(book, question)
-            elif answering_parameters['kind'] == 'rag': # rag, there is an embedding
-                user_prompt = query_message(question, my_embedding, answering_parameters, env_file)
-            elif answering_parameters['kind'] == 'ftuning':
-                user_prompt = my_benchmark.get_user_prompt_for_finetuning(question)
-            if q == 0:
-                print("[begin example of a prompt]")
-                print(user_prompt)
-                print("[end example of a prompt]")
-            out, reasoning = my_model.generate(user_prompt = user_prompt, system_prompt = system_prompt, max_new_tokens = max_new_tokens, keep_reasoning = True)
-            print(f"sleeping for {sleeping_time} seconds")
-            time.sleep(sleeping_time)
-            print("woke up")
-            answer_filepath.parent.mkdir(parents=True, exist_ok=True)
-            print(answer_filepath)
-            export_list(out, answer_filepath)
-            if reasoning is not None:
-                answer_reasoning_filepath.parent.mkdir(parents=True, exist_ok=True)
-                print(answer_reasoning_filepath)
-                export_list(reasoning, answer_reasoning_filepath)
-        generated_answer = import_list(answer_filepath)
-        generated_answers.append(generated_answer)
+                generated_answers[q] = future.result()
+            except Exception as exc:
+                print(f'Question {q} generated an exception: {exc}')
+                # Fallback to sequential processing if parallel fails for this item
+                generated_answers[q] = process_func(q)
 
     df_generated_answers = pd.concat([df_qa, pd.DataFrame({'llm_answer':generated_answers})], axis = 1)
 
