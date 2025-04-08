@@ -18,14 +18,10 @@ class ModelsWrapper:
             self.client = None # instead using the OpenRouter API directly
             self.key = config.OPENROUTER_API_KEY
         elif "claude-3" in model_name:
-            from anthropic import Anthropic, DefaultHttpxClient
-            self.client = Anthropic(
-                api_key=config.ANTHROPIC_API_KEY,
-                http_client=DefaultHttpxClient(
-                    proxies=config.PROXY['http'],
-                    verify=False
-                ),
-            )
+            from epbench.src.models.misc import no_ssl_verification
+            no_ssl_verification()
+            self.client = None # instead using the OpenRouter API directly
+            self.key = config.OPENROUTER_API_KEY
         elif "gemini" in model_name:
             from epbench.src.models.misc import no_ssl_verification
             no_ssl_verification()
@@ -88,19 +84,48 @@ class ModelsWrapper:
                 outputs = outputs.choices[0].message.content
                 #print(outputs) 
         elif "claude-3" in self.model_name:
-            outputs = self.client.messages.create(
-                model=self.model_name,
-                system = system_prompt, # different syntax compared to openai
-                messages=[
-                    {"role": "user", "content": user_prompt
-                }
-                ],
-                max_tokens = max_new_tokens,
-                temperature = temperature
+            # Convert model name format for OpenRouter (hyphens to dots and add :beta if needed)
+            # Example: claude-3-5-sonnet-20240620 -> claude-3.5-sonnet-20240620:beta
+            openrouter_model_name = self.model_name
+            if "-3-5-" in openrouter_model_name:
+                openrouter_model_name = openrouter_model_name.replace("-3-5-", "-3.5-")
+            if "-3-opus-" in openrouter_model_name:
+                openrouter_model_name = openrouter_model_name.replace("-3-opus-", "-3-opus-")
+            if "-3-sonnet-" in openrouter_model_name:
+                openrouter_model_name = openrouter_model_name.replace("-3-sonnet-", "-3-sonnet-")
+            if "-3-haiku-" in openrouter_model_name:
+                openrouter_model_name = openrouter_model_name.replace("-3-haiku-", "-3-haiku-")
+                
+            # Add :beta suffix if not present and a date is in the model name
+            if any(date in openrouter_model_name for date in ["20240620", "20240229"]) and not ":beta" in openrouter_model_name:
+                openrouter_model_name += ":beta"
+                
+            outputs = requests.post(
+                url="https://openrouter.ai/api/v1/chat/completions",
+                headers={"Authorization": f"Bearer {self.key}"},
+                data=json.dumps({
+                    "model": "anthropic/" + openrouter_model_name,
+                    "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                    ],
+                    "max_tokens": max_new_tokens,
+                    "temperature": temperature
+                }),
+                timeout=10
             )
-
+            
             if not full_outputs:
-                outputs = outputs.content[0].text
+                raw_string = outputs.text
+                cleaned_string = raw_string.strip()
+                print(cleaned_string)
+                parsed_dict = json.loads(cleaned_string)
+                if not 'choices' in parsed_dict:
+                    print(parsed_dict)
+                    # Handle error case to prevent KeyError
+                    outputs = f"Error: {parsed_dict.get('error', {}).get('message', 'Unknown error')}"
+                else:
+                    outputs = parsed_dict['choices'][0]['message']['content']
 
         elif "gemini" in self.model_name:
             outputs = requests.post(
