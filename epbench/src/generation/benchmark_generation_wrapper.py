@@ -25,6 +25,8 @@ from epbench.src.generation.generate_1_events_and_meta_events import generate_un
 # Plotting
 from pathlib import Path
 from epbench.src.plots.plotting_functions import plotting_ecdf
+# Environment variables
+from epbench.src.models.settings_wrapper import SettingsWrapper
 
 class BenchmarkGenerationWrapper:
     def __init__(
@@ -44,11 +46,22 @@ class BenchmarkGenerationWrapper:
             book_parameters = {
                 'indexing': 'default'
             },
-            data_folder = '/repo/to/git/main/epbench/data',
-            env_file = '/repo/to/git/main/.env',
+            data_folder = None,
+            env_file = None,
             verbose = True,
             rechecking = True
             ):
+        # Use environment variable if data_folder or env_file are not provided
+        if env_file is None:
+            config = SettingsWrapper()
+            repo_path = config.env["REPO_PATH"]
+            env_file = f"{repo_path}/.env"
+        
+        if data_folder is None:
+            config = SettingsWrapper(_env_file = env_file)
+            repo_path = config.env["REPO_PATH"]
+            data_folder = f"{repo_path}/epbench/data"
+            
         book, df_book_groundtruth, df_qa, df_qa_debug_widespreadness, debug_all_generated_samples = self.__end2end(
             prompt_parameters, model_parameters, book_parameters, data_folder, env_file, verbose, rechecking)
         self.book = book
@@ -114,10 +127,21 @@ class BenchmarkGenerationWrapper:
             book_parameters = {
                 'indexing': 'default'
                 },
-            data_folder = '/repo/to/git/main/epbench/data',
-            env_file = '/repo/to/git/main/.env',
+            data_folder = None,
+            env_file = None,
             verbose = True,
             rechecking = True):
+
+        # Use environment variable if data_folder or env_file are not provided
+        if env_file is None:
+            config = SettingsWrapper()
+            repo_path = config.env["REPO_PATH"]
+            env_file = f"{repo_path}/.env"
+        
+        if data_folder is None:
+            config = SettingsWrapper(_env_file = env_file)
+            repo_path = config.env["REPO_PATH"]
+            data_folder = f"{repo_path}/epbench/data"
 
         events, meta_events = generate_and_export_events_and_meta_events_func(prompt_parameters, data_folder, rechecking)
         generated_paragraphs, has_verif_vector = iterative_generate_paragraphs_func(prompt_parameters, model_parameters, data_folder, env_file, verbose, rechecking)

@@ -7,12 +7,19 @@ import numpy as np
 
 def embed_chunks(my_chunks: List[str], 
                  answering_parameters = {'kind': 'rag', 'split': 'chapter', 'embedding_model': "text-embedding-3-small", 'embedding_batch_size': 2048}, 
-                 env_file = '/repo/to/git/main/.env'):
+                 env_file = None):
     '''
     Source: https://cookbook.openai.com/examples/embedding_wikipedia_articles_for_search
     BATCH_SIZE: you can submit up to 2048 embedding inputs per request
     '''
-    config = SettingsWrapper(_env_file = env_file)
+    # Use environment variable if env_file is not provided
+    if env_file is None:
+        config = SettingsWrapper()
+        repo_path = config.env["REPO_PATH"]
+        env_file = f"{repo_path}/.env"
+    else:
+        config = SettingsWrapper(_env_file = env_file)
+        
     client = OpenAI(api_key=config.OPENAI_API_KEY)
     embedding_batch_size = answering_parameters['embedding_batch_size']
     embedding_model = answering_parameters['embedding_model']
@@ -33,14 +40,21 @@ def strings_ranked_by_relatedness(
     question: str,
     df: pd.DataFrame, # the embedding
     answering_parameters = {'kind': 'rag', 'split': 'chapter', 'embedding_model': "text-embedding-3-small", 'embedding_batch_size': 2048}, 
-    env_file = '/repo/to/git/main/.env',
+    env_file = None,
     relatedness_fn=lambda x, y: 1 - spatial.distance.cosine(x, y),
 ) -> Tuple[List[str], List[float]]:
     """
     Returns a list of strings and relatednesses, sorted from most related to least.
     Source: https://cookbook.openai.com/examples/question_answering_using_embeddings
     """
-    config = SettingsWrapper(_env_file = env_file)
+    # Use environment variable if env_file is not provided
+    if env_file is None:
+        config = SettingsWrapper()
+        repo_path = config.env["REPO_PATH"]
+        env_file = f"{repo_path}/.env"
+    else:
+        config = SettingsWrapper(_env_file = env_file)
+        
     client = OpenAI(api_key=config.OPENAI_API_KEY)
 
     query_embedding_response = client.embeddings.create(

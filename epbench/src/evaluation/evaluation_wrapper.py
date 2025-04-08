@@ -19,8 +19,20 @@ class EvaluationWrapper:
             self,
             my_benchmark: BenchmarkGenerationWrapper,
             answering_parameters = {'kind': 'prompting', 'model_name': 'claude-3-5-sonnet-20240620', 'max_new_tokens': 4096, 'sleeping_time': 15, 'policy': 'original'},
-            data_folder = '/repo/to/git/main/epbench/data',
-            env_file = '/repo/to/git/main/.env'):
+            data_folder = None,
+            env_file = None):
+        
+        # Use environment variable if data_folder or env_file are not provided
+        if env_file is None:
+            config = SettingsWrapper()
+            repo_path = config.env["REPO_PATH"]
+            env_file = f"{repo_path}/.env"
+        else:
+            config = SettingsWrapper(_env_file = env_file)
+        
+        if data_folder is None:
+            repo_path = config.env["REPO_PATH"]
+            data_folder = f"{repo_path}/epbench/data"
         
         # save the input
         self.my_benchmark = my_benchmark

@@ -5,12 +5,13 @@ from epbench.src.generation.generate_1_events_and_meta_events import generate_an
 from epbench.src.io.io import paragraph_filepath_func, export_list, import_list
 from epbench.src.generation.verification_llm import has_passed_direct_and_llm_verifications_func
 import logging
+import os
 
 def generate_paragraphs_func(
     prompt_parameters = {'nb_events': 10, 'name_universe': 'default', 'name_styles': 'default', 'seed': 0},
     model_parameters = {'model_name': 'gpt-4o-2024-05-13', 'max_new_tokens': 4096},
-    data_folder = '/repo/to/git/main/epbench/data',
-    env_file = '/repo/to/git/main/.env',
+    data_folder = None,
+    env_file = None,
     iterations = None,
     rechecking = True):
 
@@ -19,8 +20,15 @@ def generate_paragraphs_func(
     max_new_tokens = model_parameters['max_new_tokens']
     system_prompt = system_prompt_func()
 
+    # Use environment variable if data_folder or env_file are not provided
     config = SettingsWrapper(_env_file = env_file)
-
+    repo_path = config.env["REPO_PATH"]
+    
+    if data_folder is None:
+        data_folder = f"{repo_path}/epbench/data"
+    if env_file is None:
+        env_file = f"{repo_path}/.env"
+    
     events, meta_events = generate_and_export_events_and_meta_events_func(prompt_parameters, data_folder, rechecking)
     prompts = generate_prompts(events, meta_events, prompt_parameters['name_styles'])
 
@@ -64,10 +72,22 @@ def iteration_verbose_func(i, has_direct_verif_vector, final = False):
 def iterative_generate_paragraphs_func(
     prompt_parameters = {'nb_events': 10, 'name_universe': 'default', 'name_styles': 'default', 'seed': 0},
     model_parameters = {'model_name': 'gpt-4o-2024-05-13', 'max_new_tokens': 4096, 'itermax': 10},
-    data_folder = '/repo/to/git/main/epbench/data',
-    env_file = '/repo/to/git/main/.env',
+    data_folder = None,
+    env_file = None,
     verbose = True,
     rechecking = True):
+    
+    # Use environment variable if data_folder or env_file are not provided
+    if env_file is None:
+        config = SettingsWrapper()
+        repo_path = config.env["REPO_PATH"]
+        env_file = f"{repo_path}/.env"
+    
+    if data_folder is None:
+        config = SettingsWrapper(_env_file = env_file)
+        repo_path = config.env["REPO_PATH"]
+        data_folder = f"{repo_path}/epbench/data"
+    
     itermax = model_parameters['itermax']
     # The iterations parameters is automatically iterated
     iterations = [0]*prompt_parameters['nb_events']

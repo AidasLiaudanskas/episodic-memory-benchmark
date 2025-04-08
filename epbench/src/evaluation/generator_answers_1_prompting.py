@@ -86,10 +86,22 @@ def whether_do_this_q(q, q_max):
 def generate_answers_func(
     my_benchmark: BenchmarkGenerationWrapper,
     answering_parameters = {'kind': 'prompting', 'model_name': 'claude-3-5-sonnet-20240620', 'max_new_tokens': 4096, 'sleeping_time': 15},
-    data_folder = '/repo/to/git/main/epbench/data',
-    env_file = '/repo/to/git/main/.env',
+    data_folder = None,
+    env_file = None,
     my_embedding = None):
 
+    # Use environment variable if data_folder or env_file are not provided
+    if env_file is None:
+        config = SettingsWrapper()
+        repo_path = config.env["REPO_PATH"]
+        env_file = f"{repo_path}/.env"
+    else:
+        config = SettingsWrapper(_env_file = env_file)
+    
+    if data_folder is None:
+        repo_path = config.env["REPO_PATH"]
+        data_folder = f"{repo_path}/epbench/data"
+    
     prompt_parameters = my_benchmark.prompt_parameters
     model_parameters = my_benchmark.model_parameters
     book_parameters = my_benchmark.book_parameters
@@ -100,8 +112,6 @@ def generate_answers_func(
     system_prompt = "You are an expert in memory tests."
     sleeping_time = answering_parameters['sleeping_time']
     
-    config = SettingsWrapper(_env_file = env_file)
-
     book = my_benchmark.get_book()
     if answering_parameters['model_name'] == 'llama-3.1-405b-instruct':
         if my_benchmark.nb_tokens() == 102870: # 102870 for our count, but 131878 for llama3
@@ -171,9 +181,21 @@ def generate_evaluation_func(
     my_benchmark: BenchmarkGenerationWrapper,
     df_generated_answers,
     answering_parameters = {'kind': 'prompting', 'model_name': 'claude-3-5-sonnet-20240620', 'max_new_tokens': 4096},
-    data_folder = '/repo/to/git/main/epbench/data',
-    env_file = '/repo/to/git/main/.env'):
+    data_folder = None,
+    env_file = None):
 
+    # Use environment variable if data_folder or env_file are not provided
+    if env_file is None:
+        config = SettingsWrapper()
+        repo_path = config.env["REPO_PATH"]
+        env_file = f"{repo_path}/.env"
+    else:
+        config = SettingsWrapper(_env_file = env_file)
+    
+    if data_folder is None:
+        repo_path = config.env["REPO_PATH"]
+        data_folder = f"{repo_path}/epbench/data"
+    
     prompt_parameters = my_benchmark.prompt_parameters
     model_parameters = my_benchmark.model_parameters
     book_parameters = my_benchmark.book_parameters
@@ -181,8 +203,6 @@ def generate_evaluation_func(
     # model parameters
     model_name = model_parameters['model_name'] # using the model that built the benchmark, not the one answering the questions
     
-    config = SettingsWrapper(_env_file = env_file)
-
     nb_chapters = my_benchmark.nb_chapters()
     nb_tokens = my_benchmark.nb_tokens()
     split_chapters = my_benchmark.split_chapters
@@ -252,9 +272,21 @@ def generate_chronological_func(
     my_benchmark: BenchmarkGenerationWrapper,
     df_generated_evaluations,
     answering_parameters = {'kind': 'prompting', 'model_name': 'claude-3-5-sonnet-20240620', 'max_new_tokens': 4096},
-    data_folder = '/repo/to/git/main/epbench/data',
-    env_file = '/repo/to/git/main/.env'):
+    data_folder = None,
+    env_file = None):
 
+    # Use environment variable if data_folder or env_file are not provided
+    if env_file is None:
+        config = SettingsWrapper()
+        repo_path = config.env["REPO_PATH"]
+        env_file = f"{repo_path}/.env"
+    else:
+        config = SettingsWrapper(_env_file = env_file)
+    
+    if data_folder is None:
+        repo_path = config.env["REPO_PATH"]
+        data_folder = f"{repo_path}/epbench/data"
+    
     prompt_parameters = my_benchmark.prompt_parameters
     model_parameters = my_benchmark.model_parameters
     book_parameters = my_benchmark.book_parameters
@@ -262,8 +294,6 @@ def generate_chronological_func(
     # model parameters
     model_name = model_parameters['model_name'] # using the model that built the benchmark, not the one answering the questions
     
-    config = SettingsWrapper(_env_file = env_file)
-
     nb_chapters = my_benchmark.nb_chapters()
     nb_tokens = my_benchmark.nb_tokens()
 

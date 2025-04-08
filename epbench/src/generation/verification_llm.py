@@ -50,10 +50,20 @@ def generate_has_passed_llm_verification_func(
         prompt_parameters = {'nb_events': 10, 'name_universe': 'default', 'name_styles': 'default', 'seed': 0},
         model_parameters = {'model_name': 'gpt-4o-2024-05-13', 'max_new_tokens': 4096},
         model_verification_parameters = {'model_name': 'gpt-4o-2024-05-13', 'max_new_tokens': 4096},
-        data_folder = '/repo/to/git/main/epbench/data',
-        env_file = '/repo/to/git/main/.env'):
+        data_folder = None,
+        env_file = None):
     
-    config = SettingsWrapper(_env_file = env_file)
+    # Use environment variable if data_folder or env_file are not provided
+    if env_file is None:
+        config = SettingsWrapper()
+        repo_path = config.env["REPO_PATH"]
+        env_file = f"{repo_path}/.env"
+    else:
+        config = SettingsWrapper(_env_file = env_file)
+    
+    if data_folder is None:
+        repo_path = config.env["REPO_PATH"]
+        data_folder = f"{repo_path}/epbench/data"
     
     verification_paragraphs = []
     for iteration, event_index in zip(iterations, event_indexes):
