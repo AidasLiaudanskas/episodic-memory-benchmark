@@ -27,8 +27,10 @@ def get_short_name2(tuple_input):
         model_name = 'o1-preview'
     elif 'llama' in tuple_input[1]:
         model_name = 'llama-3.1'
+    elif 'gemini' in tuple_input[1]:
+        model_name = 'gemini-2.5'
     else:
-        raise ValueError('unknown model')
+        raise ValueError(f'unknown model, {tuple_input[1]}')
     
     if tuple_input[0] == 'prompting':
         output = model_name
@@ -71,9 +73,9 @@ def plot_clust(df, nb_events, relative_to, figsize=(16, 20), only_bins = None):
 
         data = data[['get', 'bins_items_correct_answer', 'cue', 
                     'gpt-4o', 'cl-3.5-sonnet\n(rag)', 'gpt-4o\n(rag)',
-                    'gpt-4o-mini\n(rag)', 'cl-3-haiku\n(rag)', 'llama-3.1',
-                    'cl-3-haiku', 'gpt-4o-mini',
-                    'cl-3.5-sonnet', 'gpt-4o-mini\n(ftuning)', 'o1-mini']]
+                    'gpt-4o-mini\n(rag)', 'llama-3.1',
+                    'cl-3-haiku',
+                    'cl-3.5-sonnet', 'gpt-4o-mini\n(ftuning)', 'o1-mini', 'gemini-2.5']]
 
         # data.index = data.apply(lambda row: (row[relative_to]), axis=1)
         data.index = data['cue']
