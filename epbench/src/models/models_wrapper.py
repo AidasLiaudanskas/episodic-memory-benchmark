@@ -133,12 +133,13 @@ class ModelsWrapper:
                 headers={"Authorization": f"Bearer {self.key}"},
                 data=json.dumps({
                     "model": "google/" + self.model_name,
+                    "transforms": ["middle-out"],
                     "messages": [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
                     ],
                 }),
-                timeout=10  # Added timeout of 10 seconds
+                timeout=15  # Added timeout of 10 seconds
             )
             
             if not full_outputs:
