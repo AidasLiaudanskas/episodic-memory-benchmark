@@ -13,6 +13,7 @@ import time
 import concurrent.futures
 from functools import partial
 import threading
+import numpy as np
 
 def check_and_remove(book, substring, error_if_not_found = True):
     count = book.count(substring)
@@ -80,11 +81,13 @@ In that moment of shared horror, Mila realized the tragic irony of her carefully
     book = check_and_remove(book, substring25)
     return book
 
-def whether_do_this_q(q, q_max):
-    if q_max is None:
-        return True
-    else:
+def whether_do_this_q(q, q_max, selected_indices=None):
+    if selected_indices is not None:
+        return q in selected_indices
+    elif q_max is not None:
         return (q < q_max)
+    else:
+        return True
             
 def process_single_question(q, df_qa, book, nb_chapters, nb_tokens, data_folder, prompt_parameters, 
                            model_parameters, book_parameters, answering_parameters, my_embedding, my_benchmark,
@@ -129,17 +132,33 @@ def process_single_question(q, df_qa, book, nb_chapters, nb_tokens, data_folder,
         with print_lock:
             print(f"Woke up from processing question {q}")
         
-        answer_filepath.parent.mkdir(parents=True, exist_ok=True)
-        with print_lock:
-            print(answer_filepath)
-        export_list(out, answer_filepath)
-        
-        if reasoning is not None:
-            answer_reasoning_filepath.parent.mkdir(parents=True, exist_ok=True)
+        # Create directory and save answer
+        try:
+            answer_filepath.parent.mkdir(parents=True, exist_ok=True)
             with print_lock:
-                print(answer_reasoning_filepath)
-            export_list(reasoning, answer_reasoning_filepath)
+                print(f"Saving answer to: {answer_filepath}")
+            export_list(out, answer_filepath)
+            if not answer_filepath.is_file():
+                print(f"WARNING: Answer file was not created successfully: {answer_filepath}")
+            else:
+                print(f"Successfully saved answer for question {q}")
+                
+            # Save reasoning if available
+            if reasoning is not None:
+                answer_reasoning_filepath.parent.mkdir(parents=True, exist_ok=True)
+                with print_lock:
+                    print(answer_reasoning_filepath)
+                export_list(reasoning, answer_reasoning_filepath)
+        except Exception as e:
+            print(f"ERROR saving answer for question {q}: {e}")
+    else:
+        print(f"Answer file already exists for question {q}: {answer_filepath}")
     
+    # Verify file exists before trying to read it
+    if not answer_filepath.is_file():
+        print(f"ERROR: Cannot read answer file for question {q} - file doesn't exist: {answer_filepath}")
+        return None
+        
     generated_answer = import_list(answer_filepath)
     return generated_answer
 
@@ -174,6 +193,33 @@ def generate_answers_func(
     nb_chapters = my_benchmark.nb_chapters()
     nb_tokens = my_benchmark.nb_tokens()
 
+    # Handle subset fraction if provided
+    selected_indices = None
+    if 'subset_fraction' in answering_parameters and answering_parameters['subset_fraction'] < 1.0:
+        subset_fraction = answering_parameters['subset_fraction']
+        
+        # Get random seed from parameters or use default
+        random_seed = answering_parameters.get('random_seed', 42)
+        
+        # Group questions by retrieval_type (time, space, entity, content)
+        grouped = df_qa.groupby('retrieval_type')
+        selected_indices = []
+        
+        # For each group, select a subset of indices based on the fraction
+        for retrieval_type, group in grouped:
+            group_indices = group.index.tolist()
+            # Calculate how many questions to select from this group
+            n_select = max(1, int(len(group_indices) * subset_fraction))
+            # Randomly select indices from this group
+            np.random.seed(random_seed)  # For reproducibility
+            selected_from_group = np.random.choice(group_indices, size=n_select, replace=False)
+            selected_indices.extend(selected_from_group)
+        
+        # Sort the indices to maintain original order
+        selected_indices.sort()
+        print(f"Selected {len(selected_indices)}/{len(df_qa)} questions ({subset_fraction*100:.1f}%) for answering")
+        print(f"Using random seed: {random_seed} for selection")
+
     # Create a lock for thread-safe printing
     global print_lock
     print_lock = threading.Lock()
@@ -198,8 +244,11 @@ def generate_answers_func(
     # Run with parallel workers
     generated_answers = [None] * len(df_qa)
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        # Submit all tasks
-        future_to_index = {executor.submit(process_func, q): q for q in range(len(df_qa))}
+        # Submit tasks only for selected indices
+        future_to_index = {}
+        for q in range(len(df_qa)):
+            if whether_do_this_q(q, None, selected_indices):
+                future_to_index[executor.submit(process_func, q)] = q
         
         # Process results as they complete
         for future in concurrent.futures.as_completed(future_to_index):
@@ -232,6 +281,10 @@ def process_single_evaluation(q, df_qa2, nb_chapters, nb_tokens, data_folder, pr
     model_name = model_parameters['model_name']
     config = SettingsWrapper(_env_file = env_file)
     
+    # Skip this question if it doesn't have an answer
+    if df_qa2.iloc[q]['llm_answer'] is None:
+        return None
+
     evaluate_filepath = evaluate_filepath_func(q, nb_chapters, nb_tokens, data_folder, prompt_parameters, model_parameters, book_parameters, answering_parameters)
     
     if not evaluate_filepath.is_file():
@@ -317,11 +370,14 @@ def generate_evaluation_func(
         env_file=env_file
     )
     
-    # Run with parallel workers
+    # Run with parallel workers - only process questions that have answers
     generated_evaluations = [None] * len(df_qa2)
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        # Submit all tasks
-        future_to_index = {executor.submit(process_func, q): q for q in range(len(df_qa2))}
+        # Submit tasks only for questions with answers
+        future_to_index = {}
+        for q in range(len(df_qa2)):
+            if df_qa2.iloc[q]['llm_answer'] is not None:
+                future_to_index[executor.submit(process_func, q)] = q
         
         # Process results as they complete
         for future in concurrent.futures.as_completed(future_to_index):
@@ -333,9 +389,19 @@ def generate_evaluation_func(
                     print(f'Evaluation {q} generated an exception: {exc}')
                 # Fallback to sequential processing if parallel fails for this item
                 generated_evaluations[q] = process_func(q)
-        
-    df_generated_evaluations = pd.DataFrame(generated_evaluations)
-    df_generated_evaluations = pd.concat([df_qa2, df_generated_evaluations], axis = 1)
+    
+    # Filter out None values before creating DataFrame
+    valid_indices = [i for i, x in enumerate(generated_evaluations) if x is not None]
+    valid_evaluations = [generated_evaluations[i] for i in valid_indices]
+    
+    # Create a DataFrame with only the valid evaluations
+    df_valid_evals = pd.DataFrame(valid_evaluations)
+    
+    # Get the corresponding rows from df_qa2
+    df_valid_qa2 = df_qa2.iloc[valid_indices].reset_index(drop=True)
+    
+    # Combine the dataframes
+    df_generated_evaluations = pd.concat([df_valid_qa2, df_valid_evals], axis=1)
 
     return df_generated_evaluations
 
@@ -344,8 +410,9 @@ def process_single_chronological(q, df_qa3, nb_chapters, nb_tokens, data_folder,
     model_name = model_parameters['model_name']
     config = SettingsWrapper(_env_file = env_file)
     
-    if df_qa3.iloc[q]['get'] != 'chronological':
-        return None  # Skip non-chronological items
+    # Skip non-chronological questions or those without predicted items
+    if df_qa3.iloc[q]['get'] != 'chronological' or 'predicted_items' not in df_qa3.columns or df_qa3.iloc[q]['predicted_items'] is None:
+        return None
         
     chronological_filepath = chronological_filepath_func(q, nb_chapters, nb_tokens, data_folder, prompt_parameters, 
                                                        model_parameters, book_parameters, answering_parameters)
@@ -395,8 +462,11 @@ def generate_chronological_func(
     global print_lock
     print_lock = threading.Lock()
     
-    # Find chronological questions first
-    chronological_indices = [q for q in range(len(df_qa3)) if df_qa3.iloc[q]['get'] == 'chronological']
+    # Find chronological questions first and ensure they have answers
+    chronological_indices = [q for q in range(len(df_qa3)) 
+                             if df_qa3.iloc[q]['get'] == 'chronological' 
+                             and 'predicted_items' in df_qa3.columns 
+                             and df_qa3.iloc[q]['predicted_items'] is not None]
     
     if not chronological_indices:
         return pd.DataFrame([])  # Return empty DataFrame if no chronological questions
@@ -418,7 +488,7 @@ def generate_chronological_func(
     # Run with parallel workers
     generated_chronologicals = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        # Submit only chronological tasks
+        # Submit only chronological tasks with answers
         future_to_index = {executor.submit(process_func, q): q for q in chronological_indices}
         
         # Process results as they complete
@@ -426,7 +496,8 @@ def generate_chronological_func(
             q = future_to_index[future]
             try:
                 result = future.result()
-                generated_chronologicals.append(result)
+                if result is not None:
+                    generated_chronologicals.append(result)
             except Exception as exc:
                 with print_lock:
                     print(f'Chronological evaluation {q} generated an exception: {exc}')

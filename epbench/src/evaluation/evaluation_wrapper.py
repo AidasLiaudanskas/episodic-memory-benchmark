@@ -27,6 +27,10 @@ class EvaluationWrapper:
         self.data_folder = data_folder
         self.env_file = env_file
         self.policy = answering_parameters['policy']
+        
+        # Print subset info if applicable
+        if 'subset_fraction' in answering_parameters and answering_parameters['subset_fraction'] < 1.0:
+            print(f"Using subset_fraction = {answering_parameters['subset_fraction']}")
 
         # generated answers
         if answering_parameters['kind'] == 'prompting':
@@ -148,14 +152,28 @@ class EvaluationWrapper:
         else:
             raise ValueError('unknown "kind", should be "prompting", "rag" or "ftuning"')
         
+        # Print answer statistics
+        total_questions = len(self.df_generated_answers)
+        answered_questions = self.df_generated_answers['llm_answer'].count()
+        print(f"Generated answers for {answered_questions}/{total_questions} questions ({answered_questions/total_questions*100:.1f}%)")
+        
         # generated evaluation (given answers)
         df_generated_evaluations = generate_evaluation_func(my_benchmark, self.df_generated_answers, answering_parameters, data_folder, env_file)
         # possibly with a different policy for the final evaluation
         self.df_generated_evaluations = update_policy_of_evaluation_to(df_generated_evaluations, self.policy)
+        
+        # Print evaluation statistics
+        total_evaluations = len(self.df_generated_evaluations)
+        print(f"Generated evaluations for {total_evaluations}/{answered_questions} answered questions")
 
         # generated chronological (given evaluation)
         df_generated_chronological = generate_chronological_func(my_benchmark, self.df_generated_evaluations, answering_parameters, data_folder, env_file)
         self.df_generated_chronological = df_generated_chronological
+        
+        # Print chronological statistics
+        if len(df_generated_chronological) > 0:
+            print(f"Generated chronological evaluations for {len(df_generated_chronological)} questions")
+        
         self.kendall_summaries_for_this_experiment = self.compute_kendall_summarise(df_generated_chronological, verbose = False)
 
     def cancel_job(self, ftjob_id = 'ftjob-wjldwdkjw0eiw'):
