@@ -25,7 +25,11 @@ def get_short_name2(tuple_input):
         model_name = 'o1-mini'
     elif 'o1-preview' in tuple_input[1]:
         model_name = 'o1-preview'
-    elif 'llama' in tuple_input[1]:
+    elif 'llama-4-scout' in tuple_input[1]:
+        model_name = 'llama-4-scout'
+    elif 'llama-4-maverick' in tuple_input[1]:
+        model_name = 'llama-4-maverick'
+    elif 'llama-3' in tuple_input[1]:
         model_name = 'llama-3.1'
     elif 'gemini' in tuple_input[1]:
         model_name = 'gemini-2.5'

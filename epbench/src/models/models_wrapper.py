@@ -112,7 +112,7 @@ class ModelsWrapper:
                     "max_tokens": max_new_tokens,
                     "temperature": temperature
                 }),
-                timeout=10
+                timeout=20
             )
             
             if not full_outputs:
@@ -139,7 +139,7 @@ class ModelsWrapper:
                     {"role": "user", "content": user_prompt}
                     ],
                 }),
-                timeout=15  # Added timeout of 10 seconds
+                timeout=25
             )
             
             if not full_outputs:
@@ -161,9 +161,12 @@ class ModelsWrapper:
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
                     ],
-                    "provider": {"order": ["Fireworks"]} # working with large context, contrary to the others
+                    "max_tokens": max_new_tokens,
+                    "temperature": temperature,
+                    # Only specify provider for llama-3, not for llama-4
+                    "provider": {"order": ["Fireworks"]} if "llama-3" in self.model_name else None
                 })
-                )
+            )
             
             if not full_outputs:
                 raw_string = outputs.text
