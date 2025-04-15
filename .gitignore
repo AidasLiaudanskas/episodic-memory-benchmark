@@ -173,4 +173,6 @@ cython_debug/
 
 epbench/data/
 epbench/28244480/
+*.pdf
+*.png
 *.DS_Store
