@@ -7,6 +7,7 @@ def get_precomputed_results(experiments,
                             data_folder,
                             all_benchmarks = {'benchmark_claude_default_20': None,
                                               'benchmark_claude_default_200': None,
+                                              'benchmark_claude_default_1500': None,
                                               'benchmark_claude_default_2000': None,
                                               'benchmark_claude_default_20_ordered': None,
                                               'benchmark_claude_default_200_ordered': None,
@@ -59,8 +60,16 @@ def get_precomputed_results(experiments,
                     my_benchmark = all_benchmarks['benchmark_claude_default_200']
             elif df_cur['book_nb_events'] == 2000:
                 my_benchmark = all_benchmarks['benchmark_claude_default_2000']
+            elif df_cur['book_nb_events'] == 1500:
+                my_benchmark = all_benchmarks['benchmark_claude_default_1500']
             else:
-                raise ValueError('For `claude-3-5-sonnet-20240620`, only done with 20, 200, and 2000 target events')
+                # Handle custom book sizes by checking if they're in all_benchmarks
+                benchmark_key = f"benchmark_claude_default_{df_cur['book_nb_events']}"
+                if benchmark_key in all_benchmarks and all_benchmarks[benchmark_key] is not None:
+                    my_benchmark = all_benchmarks[benchmark_key]
+                    print(f"Using custom benchmark for {df_cur['book_nb_events']} events")
+                else:
+                    raise ValueError(f"No benchmark available for {df_cur['book_nb_events']} events")
         elif df_cur['book_model_name'] == 'gpt-4o-2024-05-13':
             if df_cur['book_nb_events'] == 20:
                 my_benchmark = all_benchmarks['benchmark_gpt_default_20']
@@ -114,6 +123,16 @@ def get_precomputed_results(experiments,
                     answering_parameters['fine_tuned_model_name'] = 'ft:gpt-4o-2024-08-06:personal::DISCARDED' # DISCARDED (~400 dollars)
                 else:
                     raise ValueError('only done for gpt4o and gpt4o-mini')
+                    
+        # Add subset_fraction and random_seed if they exist in the experiment)
+        if 'subset_fraction' in df_cur:
+            answering_parameters['subset_fraction'] = float(df_cur['subset_fraction'])
+            print(f"Using subset_fraction: {df_cur['subset_fraction']}")
+            
+        if 'random_seed' in df_cur:
+            answering_parameters['random_seed'] = int(df_cur['random_seed'])
+            print(f"Using random_seed: {df_cur['random_seed']}")
+            
         str_print = f"Document with {my_benchmark.nb_tokens()} tokens, answer with {df_cur['answering_kind']} using with {df_cur['answering_model_name']}"
         if df_cur['answering_kind'] == 'rag':
             str_print = f"{str_print} ({df_cur['answering_embedding_chunk']} chunks)"
