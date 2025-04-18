@@ -130,7 +130,7 @@ def get_precomputed_results(experiments,
             print(f"Using subset_fraction: {df_cur['subset_fraction']}")
             
         if 'random_seed' in df_cur:
-            answering_parameters['random_seed'] = int(df_cur['random_seed'])
+            answering_parameters['random_seed'] = df_cur['random_seed']
             print(f"Using random_seed: {df_cur['random_seed']}")
             
         str_print = f"Document with {my_benchmark.nb_tokens()} tokens, answer with {df_cur['answering_kind']} using with {df_cur['answering_model_name']}"
