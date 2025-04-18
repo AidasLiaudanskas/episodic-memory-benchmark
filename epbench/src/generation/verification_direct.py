@@ -81,7 +81,7 @@ def verification_entity_shape_func(text, verbose):
 
     if verbose:
         if not has_correct_entity_occurrences:
-            print(f' - Expected always "$entity_", but observed {','.join(results)}')
+            print(f" - Expected always '$entity_', but observed {','.join(results)}")
 
     return has_correct_entity_occurrences
 
@@ -101,7 +101,8 @@ def verification_entity_shape_integer_func(text, verbose):
 
     if verbose:
         if not all_valid:
-            print(f' - Expected to see only {','.join(matches)}, but saw all {','.join(all_entities)}')
+            # Using double quotes for the f-string to avoid conflict with single quotes inside join
+            print(f" - Expected to see only {','.join(matches)}, but saw all {','.join(all_entities)}")
     
     return all_valid
 
@@ -132,10 +133,12 @@ def verification_paragraphs_func(paragraphs, event, meta_event, verbose = True):
 
     # check number of paragraphs
     cut_paragraphs = cut_paragraph_func(paragraphs)
-    if meta_event['nb_paragraphs'] != len(cut_paragraphs):
+    nb_paragraphs_expected = meta_event['nb_paragraphs']
+    nb_paragraphs_observed = len(cut_paragraphs)
+    if nb_paragraphs_expected != nb_paragraphs_observed:
         verification_dict['paragraphs_nb'] = failing
         if verbose:
-            print(f' - Expected {meta_event['nb_paragraphs']} paragraphs, but observed {str(len(cut_paragraphs))}')
+            print(f' - Expected {nb_paragraphs_expected} paragraphs, but observed {nb_paragraphs_observed}')
         return verification_dict
     else:
         verification_dict['paragraphs_nb'] = passing
@@ -145,7 +148,7 @@ def verification_paragraphs_func(paragraphs, event, meta_event, verbose = True):
     if any(x == '' for x in candidate_numbering):
         verification_dict['paragraphs_initials_shape'] = failing
         if verbose:
-            print(f' - Expected always (X) at the begin of paragraphs, but observed {','.join(candidate_numbering)}')
+            print(f" - Expected always (X) at the begin of paragraphs, but observed {','.join(candidate_numbering)}")
         return verification_dict
     else:
         verification_dict['paragraphs_initials_shape'] = passing
@@ -155,7 +158,7 @@ def verification_paragraphs_func(paragraphs, event, meta_event, verbose = True):
     if not all([c==e for (c,e) in zip(candidate_numbering, expected_numbering)]):
         verification_dict['paragraphs_initials_increment'] = failing
         if verbose:
-            print(f' - Expected {','.join(expected_numbering)}, but observed {','.join(candidate_numbering)}')
+            print(f" - Expected {','.join(expected_numbering)}, but observed {','.join(candidate_numbering)}")
         return verification_dict
     else:
         verification_dict['paragraphs_initials_increment'] = passing
