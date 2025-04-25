@@ -5,6 +5,9 @@ import numpy as np
 # for rag
 from epbench.src.generation.generate_3_secondary_entities import count_tokens
 from epbench.src.evaluation.generator_answers_2_rag import embed_chunks
+# --- ADDED: Import for GraphRAG ---
+from epbench.src.evaluation.generator_answers_4_graphrag import generate_answers_graphrag
+# --- End Added Import ---
 from epbench.src.io.io import answer_dirpath_func, import_list, export_list, export_jsonl
 import pandas as pd
 import ast
@@ -13,6 +16,7 @@ from epbench.src.evaluation.generator_answers_3_ftuning import upload_ftuning_in
 from openai import OpenAI
 from epbench.src.models.settings_wrapper import SettingsWrapper
 from scipy.stats import kendalltau
+from pathlib import Path
 
 class EvaluationWrapper:
     def __init__(
@@ -31,6 +35,9 @@ class EvaluationWrapper:
         # Print subset info if applicable
         if 'subset_fraction' in answering_parameters and answering_parameters['subset_fraction'] < 1.0:
             print(f"Using subset_fraction = {answering_parameters['subset_fraction']}")
+
+        # Store answering parameters for later use if needed
+        self.answering_parameters = answering_parameters
 
         # generated answers
         if answering_parameters['kind'] == 'prompting':
@@ -61,6 +68,62 @@ class EvaluationWrapper:
             ## [\embedding code] -- the rest as for the 'prompting' kind
             
             self.df_generated_answers = generate_answers_func(my_benchmark, answering_parameters, data_folder, env_file, self.my_embedding)
+        elif answering_parameters['kind'] == 'graphrag':
+            print("--- Handling 'graphrag' answering kind ---")
+            
+            # 1. Get and validate the GraphRAG index path from answering_parameters
+            try:
+                # Use the path provided by quickstart.py
+                graphrag_index_path = Path(self.answering_parameters['graphrag_index_dir'])
+                print(f"Target GraphRAG index directory: {graphrag_index_path}")
+                
+                # Use Path object method for checking existence
+                if not graphrag_index_path.is_dir():
+                    raise FileNotFoundError(f"GraphRAG index directory not found at specified location: {graphrag_index_path}")
+                    
+            except KeyError:
+                 print("ERROR: 'graphrag_index_dir' not found in answering_parameters.")
+                 print("       Please ensure it's correctly passed from quickstart.py.")
+                 raise # Re-raise to stop execution
+            except FileNotFoundError as e:
+                 print(f"ERROR: {e}")
+                 raise # Re-raise to stop execution
+            
+            # MOVED UP: Get the full QA DataFrame *before* calling the generator
+            df_qa_full = self.my_benchmark.get_df_qa().reset_index().rename(columns={'index': 'q_idx'}) # Ensure q_idx column exists
+
+            # 3. Call the GraphRAG answer generation function, passing the index path and questions
+            print("Generating answers using GraphRAG...")
+            # generate_answers_graphrag now returns the full DataFrame
+            # Assign directly to self.df_generated_answers
+            self.df_generated_answers = generate_answers_graphrag(
+                df_questions=df_qa_full, # Pass the questions DataFrame
+                graph_components_dir=graphrag_index_path, # Pass the determined path
+                env_file=env_file,
+                my_benchmark=my_benchmark,
+                answering_parameters=self.answering_parameters, # Pass the whole dict
+                data_folder=data_folder # Needed for constructing answer file paths inside generator
+            )
+            # REMOVED: The raw dataframe and merge step are no longer needed
+            # df_generated_answers_raw = generate_answers_graphrag(...)
+            # print(f"Raw answers generated: {len(df_generated_answers_raw)} rows")
+            
+            # 4. Merge raw answers (q_idx, llm_answer) with the full ground truth QA dataframe
+            # This ensures the final DataFrame has all necessary columns for evaluation steps
+            # REMOVED: df_qa_full definition moved above
+            # df_qa_full = self.my_benchmark.get_df_qa().reset_index().rename(columns={'index': 'q_idx'}) # Ensure q_idx column exists
+            
+            # REMOVED: Merge step is now handled inside generate_answers_graphrag
+            # print(f"Merging {len(df_generated_answers_raw)} answers with {len(df_qa_full)} ground truth questions...")
+            # self.df_generated_answers = pd.merge(
+            #     df_qa_full,
+            #     df_generated_answers_raw[['q_idx', 'llm_answer']], # Select only needed cols
+            #     on='q_idx',
+            #     how='left' # Keep all original questions, add answers where available
+            # )
+            print("Finished GraphRAG answer generation.")
+            # Clear the loaded pipeline from memory if desired (optional)
+            # del self.graphrag_pipeline 
         elif answering_parameters['kind'] == 'ftuning':
             ## [fine tuning input data code] -- all this paragraph for uploading the jsonl
             
@@ -153,28 +216,34 @@ class EvaluationWrapper:
             raise ValueError('unknown "kind", should be "prompting", "rag" or "ftuning"')
         
         # Print answer statistics
-        total_questions = len(self.df_generated_answers)
-        answered_questions = self.df_generated_answers['llm_answer'].count()
-        print(f"Generated answers for {answered_questions}/{total_questions} questions ({answered_questions/total_questions*100:.1f}%)")
-        
-        # generated evaluation (given answers)
-        df_generated_evaluations = generate_evaluation_func(my_benchmark, self.df_generated_answers, answering_parameters, data_folder, env_file)
-        # possibly with a different policy for the final evaluation
-        self.df_generated_evaluations = update_policy_of_evaluation_to(df_generated_evaluations, self.policy)
-        
-        # Print evaluation statistics
-        total_evaluations = len(self.df_generated_evaluations)
-        print(f"Generated evaluations for {total_evaluations}/{answered_questions} answered questions")
+        if self.df_generated_answers.empty:
+            print("Warning: No answers were generated. Skipping evaluation and chronological steps.")
+            self.df_generated_evaluations = pd.DataFrame()
+            self.df_generated_chronological = pd.DataFrame()
+            self.kendall_summaries_for_this_experiment = pd.DataFrame()
+        else:
+            total_questions = len(self.df_generated_answers)
+            answered_questions = self.df_generated_answers['llm_answer'].count()
+            print(f"Generated answers for {answered_questions}/{total_questions} questions ({answered_questions/total_questions*100:.1f}%)")
+            
+            # generated evaluation (given answers)
+            df_generated_evaluations = generate_evaluation_func(my_benchmark, self.df_generated_answers, answering_parameters, data_folder, env_file)
+            # possibly with a different policy for the final evaluation
+            self.df_generated_evaluations = update_policy_of_evaluation_to(df_generated_evaluations, self.policy)
+            
+            # Print evaluation statistics
+            total_evaluations = len(self.df_generated_evaluations)
+            print(f"Generated evaluations for {total_evaluations}/{answered_questions} answered questions")
 
-        # generated chronological (given evaluation)
-        df_generated_chronological = generate_chronological_func(my_benchmark, self.df_generated_evaluations, answering_parameters, data_folder, env_file)
-        self.df_generated_chronological = df_generated_chronological
-        
-        # Print chronological statistics
-        if len(df_generated_chronological) > 0:
-            print(f"Generated chronological evaluations for {len(df_generated_chronological)} questions")
-        
-        self.kendall_summaries_for_this_experiment = self.compute_kendall_summarise(df_generated_chronological, verbose = False)
+            # generated chronological (given evaluation)
+            df_generated_chronological = generate_chronological_func(my_benchmark, self.df_generated_evaluations, answering_parameters, data_folder, env_file)
+            self.df_generated_chronological = df_generated_chronological
+            
+            # Print chronological statistics
+            if len(df_generated_chronological) > 0:
+                print(f"Generated chronological evaluations for {len(df_generated_chronological)} questions")
+            
+            self.kendall_summaries_for_this_experiment = self.compute_kendall_summarise(df_generated_chronological, verbose = False)
 
     def cancel_job(self, ftjob_id = 'ftjob-wjldwdkjw0eiw'):
         self.client.fine_tuning.jobs.cancel(ftjob_id)

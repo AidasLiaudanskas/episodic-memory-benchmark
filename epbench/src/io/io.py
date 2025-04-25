@@ -85,20 +85,25 @@ def answer_dir_name_func(answering_parameters = {'kind': 'prompting', 'model_nam
     '''
     Final folder path of the answers
     '''
-    if answering_parameters['kind'] == 'prompting':
-        kind_str = f"kind_{answering_parameters['kind']}"
-        model_str = f"model_{answering_parameters['model_name']}"
+    kind = answering_parameters.get('kind', 'prompting')
+    model_name = answering_parameters.get('model_name', 'unknown_model')
+    
+    kind_str = f"kind_{kind}"
+    model_str = f"model_{model_name}"
+
+    if kind == 'prompting':
         return f"answered_by_{kind_str}_{model_str}"
-    elif answering_parameters['kind'] == 'rag':
-        kind_str = f"kind_{answering_parameters['kind']}"
-        model_str = f"model_{answering_parameters['model_name']}"
-        chunk_str = f"chunk_{answering_parameters['embedding_chunk']}_top{answering_parameters['top_n']}"
+    elif kind == 'rag':
+        chunk_str = f"chunk_{answering_parameters.get('embedding_chunk', 'unknown')}_top{answering_parameters.get('top_n', 'N')}"
         return f"answered_by_{kind_str}_{model_str}_{chunk_str}"
-    elif answering_parameters['kind'] == 'ftuning':
-        kind_str = f"kind_{answering_parameters['kind']}"
-        model_str = f"model_{answering_parameters['model_name']}"
-        ftuning_str = f"fpolicy_{answering_parameters['ftuning_input_data_policy']}"
+    elif kind == 'ftuning':
+        ftuning_str = f"fpolicy_{answering_parameters.get('ftuning_input_data_policy', 'unknown')}"
         return f"answered_by_{kind_str}_{model_str}_{ftuning_str}"
+    elif kind == 'graphrag':
+        return f"answered_by_{kind_str}_{model_str}"
+    else:
+        print(f"Warning: Unknown answering_kind '{kind}' in answer_dir_name_func. Using default name.")
+        return f"answered_by_kind_unknown_{model_str}"
 
 def answer_filepath_func(q: int, nb_chapters, nb_tokens, data_folder, prompt_parameters, model_parameters, book_parameters, answering_parameters):
     '''

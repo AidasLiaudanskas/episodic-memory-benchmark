@@ -21,16 +21,19 @@ parser.add_argument('--env_file', type=str, default=str(env_file),
 parser.add_argument('--book_nb_events', type=int, default=20,
                     help='Number of events in the book (20 for short and 200 for long, for the default experiment)')
 parser.add_argument('--answering_kind', type=str, default='prompting',
-                    help='Answering kind')
+                    help='Answering kind (e.g., prompting, rag, graphrag, ftuning)')
 parser.add_argument('--answering_model_name', type=str, default='gpt-4o-mini-2024-07-18',
                     help='Answering model name')
 parser.add_argument('--subset_fraction', type=float, default=1.0,
                     help='Fraction of questions to answer (between 0 and 1, default 1.0 answers all questions)')
 parser.add_argument('--random_seed', type=int, default=RANDOM_SEED,
                     help=f'Random seed for reproducibility (default: {RANDOM_SEED})')
+parser.add_argument('--graphrag_index_dir', type=str, default='',
+                    help='Path to the GraphRAG index output directory (leave empty to auto-detect based on data_folder and nb_events)')
 
 # Override the file paths and set any custom seed
 args = parser.parse_args()
+
 data_folder = Path(args.data_folder)
 env_file = Path(args.env_file)
 
@@ -81,6 +84,27 @@ answering_parameters = {
   'subset_fraction': args.subset_fraction,
   'random_seed': RANDOM_SEED
   }
+
+# ADDED: Conditionally add graphrag_index_dir to parameters, constructing default if needed
+if args.answering_kind == 'graphrag':
+    graphrag_dir_arg = args.graphrag_index_dir
+    if not graphrag_dir_arg: # If the argument was empty, use the benchmark output folder
+        # Use the benchmark output folder as the root for the GraphRAG index
+        # Assumes graphrag index was built with this folder as its root,
+        # containing settings.yaml and the output/ subfolder.
+        graphrag_dir = my_benchmark.get_benchmark_dirpath()
+        print(f"--graphrag_index_dir not specified, using benchmark output folder as GraphRAG root: {graphrag_dir}")
+    else:
+        graphrag_dir = Path(graphrag_dir_arg) # Ensure it's a Path object
+
+    # Store the resolved, absolute path string
+    answering_parameters['graphrag_index_dir'] = str(graphrag_dir.resolve())
+
+    # Ensure the directory exists (basic check)
+    if not graphrag_dir.is_dir():
+        print(f"Warning: Constructed or provided GraphRAG index root directory does not exist: {graphrag_dir}")
+        # Consider raising an error here if the directory MUST exist before proceeding
+        # raise FileNotFoundError(f"GraphRAG index root directory not found: {graphrag_dir}")
 
 ## Prediction (generate answers, then evaluate them)
 from epbench.src.evaluation.evaluation_wrapper import EvaluationWrapper

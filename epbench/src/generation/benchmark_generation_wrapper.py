@@ -188,6 +188,20 @@ class BenchmarkGenerationWrapper:
 
         return book, df_book_groundtruth, df_qa, df_qa_debug_widespreadness, debug_all_generated_samples
 
+    # ADDED: Method to get the benchmark's output directory path
+    def get_benchmark_dirpath(self):
+        """Returns the directory path for this specific benchmark instance."""
+        nb_chapters = self.nb_chapters()
+        nb_tokens = self.nb_tokens()
+        return book_dirpath_func(
+            nb_chapters, 
+            nb_tokens, 
+            self.data_folder, 
+            self.prompt_parameters, 
+            self.model_parameters, 
+            self.book_parameters
+        )
+
     ## Related to `df_book_groundtruth`
     def get_df_book_groundtruth(self):
         return self.df_book_groundtruth
