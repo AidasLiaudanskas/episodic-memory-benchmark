@@ -11,10 +11,6 @@ RANDOM_SEED = 42
 random.seed(RANDOM_SEED)
 np.random.seed(RANDOM_SEED)
 
-# --- Add GraphRAG imports ---
-from epbench.src.graph_construction.graph_wrapper import create_and_save_graph, DEFAULT_EMBEDDING_MODEL, DEFAULT_EXTRACTION_MODEL
-# --- End GraphRAG imports ---
-
 # Parsing the arguments
 import argparse
 parser = argparse.ArgumentParser()
@@ -32,12 +28,6 @@ parser.add_argument('--subset_fraction', type=float, default=1.0,
                     help='Fraction of questions to answer (between 0 and 1, default 1.0 answers all questions)')
 parser.add_argument('--random_seed', type=int, default=RANDOM_SEED,
                     help=f'Random seed for reproducibility (default: {RANDOM_SEED})')
-parser.add_argument('--run_graph_creation', action='store_true', 
-                    help='Run the GraphRAG creation process only.')
-parser.add_argument('--graph_embedding_model', type=str, default=DEFAULT_EMBEDDING_MODEL,
-                    help=f'Embedding model for graph creation (default: {DEFAULT_EMBEDDING_MODEL})')
-parser.add_argument('--graph_extraction_model', type=str, default=DEFAULT_EXTRACTION_MODEL,
-                    help=f'Extraction model for graph creation (default: {DEFAULT_EXTRACTION_MODEL})')
 
 # Override the file paths and set any custom seed
 args = parser.parse_args()
@@ -50,14 +40,6 @@ if args.random_seed != RANDOM_SEED:
     random.seed(RANDOM_SEED)
     np.random.seed(RANDOM_SEED)
     print(f"Using random seed: {RANDOM_SEED}")
-
-# --- TEMP: Reduce events for quick testing --- 
-if args.run_graph_creation:
-     print("--- RUNNING GRAPH CREATION TEST --- ")
-     if args.book_nb_events > 10: # Limit for test runs
-         print(f"Limiting book_nb_events from {args.book_nb_events} to 5 for graph creation test.")
-         args.book_nb_events = 5 
-# --- END TEMP --- 
 
 # Step 1: generating the synthetic episodic memory dataset
 
@@ -86,27 +68,6 @@ model_parameters = {
 from epbench.src.generation.benchmark_generation_wrapper import BenchmarkGenerationWrapper
 my_benchmark = BenchmarkGenerationWrapper(
   prompt_parameters, model_parameters, book_parameters, data_folder, env_file, rechecking=False)
-print(f"Benchmark data generated/loaded for {my_benchmark.nb_chapters()} chapters.")
-
-# --- START: GraphRAG Creation Step (Conditional) ---
-if args.run_graph_creation:
-    print("\n--- Starting GraphRAG Component Creation (as requested) ---")
-    try:
-        graph_components_dir = create_and_save_graph(
-            benchmark=my_benchmark,
-            env_file=str(env_file),
-            embedding_model=args.graph_embedding_model,
-            extraction_model=args.graph_extraction_model,
-            force_rebuild=True # Force rebuild for this test run
-        )
-        print(f"--- GraphRAG components successfully generated in: {graph_components_dir} ---")
-        print("--- Skipping evaluation steps as run_graph_creation flag is set. --- ")
-        exit() # Exit script after graph creation
-    except Exception as e:
-        print(f"--- ERROR during GraphRAG component creation: {e} ---")
-        print(traceback.format_exc())
-        exit(1) # Exit with error
-# --- END: GraphRAG Creation Step ---
 
 # Step 2: predicting the answers given the document and the questions
 
