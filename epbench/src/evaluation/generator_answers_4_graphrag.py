@@ -7,11 +7,16 @@ import time
 import traceback
 import asyncio # Added for running async API calls
 from pathlib import Path
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Tuple
 import logging
+import threading # Added for print lock, similar to prompting script
 
-# ADDED: Configure logging to suppress INFO messages from graphrag
-logging.getLogger("graphrag").setLevel(logging.WARNING)
+# REMOVED: Specific logger configurations
+# logging.getLogger("graphrag").setLevel(logging.WARNING)
+# logging.getLogger("lancedb").setLevel(logging.WARNING)
+
+# ADDED: Set global logging level to WARNING
+logging.basicConfig(level=logging.WARNING)
 
 import numpy as np
 import pandas as pd
@@ -31,10 +36,107 @@ from graphrag.config.load_config import load_config
 # ADDED: Imports for saving and path generation
 from epbench.src.io.io import answer_filepath_func, export_list, import_list
 from epbench.src.generation.benchmark_generation_wrapper import BenchmarkGenerationWrapper # For type hint
+# ADDED: Import SettingsWrapper to get MAX_WORKERS
+from epbench.src.models.settings_wrapper import SettingsWrapper
 
 # --- Constants ---
 DEFAULT_ANSWERING_MODEL = "gpt-4o-mini-2024-07-18"
 DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small" # Keep for reference
+
+# Create a lock for thread-safe printing (similar to prompting script)
+global print_lock
+print_lock = threading.Lock()
+
+# --- Helper Function for Single Question Processing ---
+
+async def process_single_question_graphrag(
+    q_idx: int,
+    question: str,
+    # GraphRAG components (passed from main function)
+    graphrag_config: Dict,
+    entities: pd.DataFrame,
+    communities: pd.DataFrame,
+    community_reports: pd.DataFrame,
+    text_units: pd.DataFrame,
+    relationships: pd.DataFrame,
+    covariates: pd.DataFrame,
+    # Path and config parameters
+    nb_chapters: int,
+    nb_tokens: int,
+    data_folder: Path,
+    prompt_parameters: Dict,
+    model_parameters: Dict,
+    book_parameters: Dict,
+    answering_parameters: Dict,
+    community_level: int,
+    semaphore: asyncio.Semaphore
+) -> Dict[str, Any]:
+    """
+    Processes a single question using GraphRAG's local_search API.
+    Does NOT handle caching - assumes the question needs processing.
+    Saves the result to a file.
+
+    Returns:
+        A dictionary containing 'q_idx', 'question', 'llm_answer', 'retrieved_context'.
+    """
+    output_filepath = answer_filepath_func(
+        q=q_idx,
+        nb_chapters=nb_chapters, nb_tokens=nb_tokens, data_folder=data_folder,
+        prompt_parameters=prompt_parameters, model_parameters=model_parameters,
+        book_parameters=book_parameters, answering_parameters=answering_parameters
+    )
+
+    answer = "Error generating answer via GraphRAG." # Default error answer
+    retrieved_context = "Context unavailable due to error." # Default error context
+
+    async with semaphore: # Limit concurrency
+        with print_lock:
+             print(f"    Starting GraphRAG query for Q_ID: {q_idx}...")
+        try:
+            api_response, api_context = await api.local_search(
+                config=graphrag_config,
+                entities=entities,
+                communities=communities,
+                community_reports=community_reports,
+                text_units=text_units,
+                relationships=relationships,
+                covariates=covariates,
+                query=question,
+                community_level=community_level,
+                response_type="Multiple Paragraphs"
+            )
+            answer = api_response
+            # Ensure context is string even if None or complex object
+            retrieved_context = str(api_context) if api_context is not None else "Context Unavailable"
+
+            with print_lock:
+                 print(f"    Finished GraphRAG query for Q_ID: {q_idx}.")
+
+            # Save successful result to cache
+            answer_to_save = str(answer) if answer is not None else "Processing Skipped/Failed"
+            try:
+                output_filepath.parent.mkdir(parents=True, exist_ok=True)
+                export_list(answer_to_save, output_filepath)
+                # with print_lock:
+                #     print(f"  Successfully saved answer to: {output_filepath}")
+            except Exception as e_save:
+                with print_lock:
+                    print(f"  Error saving answer for q_idx {q_idx} to JSON: {e_save}")
+
+        except Exception as e_async:
+            with print_lock:
+                print(f"    ERROR inside async local_search for Q_ID {q_idx} ('{question[:30]}...'): {e_async}")
+            retrieved_context = f"Error during GraphRAG processing: {e_async}"
+
+    # Return processed data including original row info
+    processed_data = {
+        'q_idx': q_idx,
+        'question': question,
+        'llm_answer': str(answer) if answer is not None else "Processing Skipped/Failed",
+        'retrieved_context': str(retrieved_context) # Already ensured string above
+    }
+    return processed_data
+
 
 # --- Main Function ---
 
@@ -42,7 +144,7 @@ def generate_answers_graphrag(
     df_questions: pd.DataFrame,
     graph_components_dir: Path, # This is the specific path to the graphrag index (e.g., .../output)
     env_file: str,
-    # ADDED: Parameters needed for path generation and saving
+    # Parameters needed for path generation and saving
     my_benchmark: BenchmarkGenerationWrapper,
     answering_parameters: Dict[str, Any],
     data_folder: Path,
@@ -52,12 +154,13 @@ def generate_answers_graphrag(
     max_new_tokens: int = 1024, # Keep for reference, might be configured via settings
     subset_fraction: float = 1.0,
     random_seed: int = 42,
-    sleeping_time: int = 0,
-    community_level: int = 2 # GraphRAG parameter - assuming QueryEngine uses it
+    sleeping_time: int = 0, # Less relevant with async, but keep for consistency
+    community_level: int = 2 # GraphRAG parameter
 ) -> pd.DataFrame:
     """
     Generates answers for a given set of questions using GraphRAG and saves them individually as JSON.
-    Uses the `graphrag.api` pattern.
+    Uses the `graphrag.api` pattern with parallel asyncio execution limited by MAX_WORKERS.
+    Structure mimics generator_answers_1_prompting.py more closely.
 
     Args:
         df_questions: DataFrame containing the questions ('q_idx', 'question').
@@ -71,27 +174,32 @@ def generate_answers_graphrag(
         max_new_tokens: Max tokens for the generated answer (informational).
         subset_fraction: Fraction of questions to process.
         random_seed: Random seed for subset selection.
-        sleeping_time: Delay between API calls (optional).
+        sleeping_time: Delay between API calls (optional, less relevant with async).
         community_level: The community level to use in GraphRAG queries.
 
     Returns:
         DataFrame with generated answers ('q_idx', 'llm_answer', 'retrieved_context').
     """
-    print(f"Starting GraphRAG answer generation (using graphrag.api)...")
+    print(f"Starting GraphRAG answer generation (using graphrag.api, parallel asyncio)... ")
     start_time = time.time()
 
     # Load environment variables
     load_dotenv(dotenv_path=env_file)
 
+    # Load MAX_WORKERS from settings
+    config = SettingsWrapper(_env_file = env_file)
+    max_workers = config.MAX_WORKERS
+    print(f"  Using MAX_WORKERS = {max_workers}")
+
     # Determine model names
     final_answering_model = answering_model_name or answering_parameters.get('model_name', DEFAULT_ANSWERING_MODEL)
-    print(f"  Target Answering LLM: {final_answering_model}")
+    print(f"  Target Answering LLM (Informational for GraphRAG): {final_answering_model}")
 
-    # --- Load GraphRAG Config and Data ---
+    # --- Load GraphRAG Config and Data ONCE ---
     try:
         print(f"  Loading GraphRAG config and data from: {graph_components_dir}")
         root_dir = Path(graph_components_dir).resolve()
-        
+
         # Check root dir exists
         if not root_dir.is_dir():
              raise FileNotFoundError(f"GraphRAG index root directory not found: {root_dir}")
@@ -102,15 +210,15 @@ def generate_answers_graphrag(
         # Note: We might want to override parts of the config here if needed, e.g., model name,
         # but the API might handle this differently or expect it in the saved config.
 
-        # 2. Load required dataframes (entities, communities)
-        entities_path = root_dir / "output" / "entities.parquet"
-        communities_path = root_dir / "output" / "communities.parquet"
-        # ADDED: Paths for other required dataframes
-        text_units_path = root_dir / "output" / "text_units.parquet"
-        relationships_path = root_dir / "output" / "relationships.parquet"
-        community_reports_path = root_dir / "output" / "community_reports.parquet"
-        covariates_path = root_dir / "output" / "covariates.parquet" # Optional?
-        
+        # 2. Load required dataframes (entities, communities, etc.)
+        output_data_dir = root_dir / "output"
+        entities_path = output_data_dir / "entities.parquet"
+        communities_path = output_data_dir / "communities.parquet"
+        text_units_path = output_data_dir / "text_units.parquet"
+        relationships_path = output_data_dir / "relationships.parquet"
+        community_reports_path = output_data_dir / "community_reports.parquet"
+        covariates_path = output_data_dir / "covariates.parquet" # Optional?
+
         # Check existence of mandatory files
         required_files = {
             "Entities": entities_path,
@@ -119,9 +227,13 @@ def generate_answers_graphrag(
             "Relationships": relationships_path,
             "Community Reports": community_reports_path
         }
+        missing_files = []
         for name, path in required_files.items():
             if not path.exists():
-                raise FileNotFoundError(f"{name} file not found: {path}")
+                missing_files.append(f"{name} ({path})")
+
+        if missing_files:
+            raise FileNotFoundError(f"Required GraphRAG files not found in {output_data_dir}:\n - " + "\n - ".join(missing_files))
 
         print("  Loading entities.parquet...")
         entities = pd.read_parquet(entities_path)
@@ -129,7 +241,6 @@ def generate_answers_graphrag(
         print("  Loading communities.parquet...")
         communities = pd.read_parquet(communities_path)
         print(f"    Loaded {len(communities)} communities.")
-        # ADDED: Load other required dataframes
         print("  Loading text_units.parquet...")
         text_units = pd.read_parquet(text_units_path)
         print(f"    Loaded {len(text_units)} text units.")
@@ -140,7 +251,7 @@ def generate_answers_graphrag(
         community_reports = pd.read_parquet(community_reports_path)
         print(f"    Loaded {len(community_reports)} community reports.")
 
-        # ADDED: Load covariates if it exists
+        # Load covariates if it exists
         if covariates_path.exists():
             print("  Loading covariates.parquet...")
             covariates = pd.read_parquet(covariates_path)
@@ -148,10 +259,6 @@ def generate_answers_graphrag(
         else:
             print("  covariates.parquet not found, proceeding without it.")
             covariates = None # Pass None if file doesn't exist
-        
-        # Global search data (not needed for local search loop)
-        # community_reports_path = root_dir / "output" / "community_reports.parquet"
-        # community_reports = pd.read_parquet(community_reports_path) if community_reports_path.exists() else None
 
     except FileNotFoundError as e:
          print(f"ERROR: Required GraphRAG file/directory not found.")
@@ -168,177 +275,289 @@ def generate_answers_graphrag(
         traceback.print_exc()
         return pd.DataFrame(columns=['q_idx', 'llm_answer', 'retrieved_context'])
 
-    # Handle subset if needed
+    # --- Prepare Questions DataFrame ---
+    # Ensure df_questions has q_idx as a column, not just index
+    local_df_questions = df_questions.copy()
+    q_idx_in_index = local_df_questions.index.name == 'q_idx'
+    q_idx_in_cols = 'q_idx' in local_df_questions.columns
+
+    if 'q_idx' not in local_df_questions.columns:
+        if local_df_questions.index.name == 'q_idx':
+            local_df_questions = local_df_questions.reset_index()
+            print("  Reset index 'q_idx' to column.")
+        else:
+            raise ValueError("Input df_questions must have a 'q_idx' column or have 'q_idx' as the index name.")
+    elif q_idx_in_index: # It's in columns AND was the index
+        local_df_questions = local_df_questions.reset_index()
+        print("  'q_idx' was both index and column. Resetting index.")
+        # Now we might have two 'q_idx' columns
+
+    # Check again if 'q_idx' column exists after potential reset_index
+    if 'q_idx' not in local_df_questions.columns:
+        raise ValueError("Failed to ensure 'q_idx' is a column after processing index.")
+
+    # --- Deduplicate 'q_idx' column if necessary ---
+    q_idx_cols = local_df_questions.columns[local_df_questions.columns == 'q_idx']
+    if len(q_idx_cols) > 1:
+        print(f"  Warning: Found {len(q_idx_cols)} columns named 'q_idx'. Keeping the first one.")
+        # Use pandas built-in method to remove duplicate columns, keeping the first occurrence
+        local_df_questions = local_df_questions.loc[:, ~local_df_questions.columns.duplicated(keep='first')]
+        print(f"    Columns after deduplication: {local_df_questions.columns.tolist()}")
+
+    # --- Validate the single 'q_idx' column ---
+    if 'q_idx' not in local_df_questions.columns:
+        raise ValueError("Critical Error: 'q_idx' column lost during deduplication.")
+    if isinstance(local_df_questions['q_idx'], pd.DataFrame):
+        raise ValueError(f"Critical Error: 'q_idx' is still a DataFrame after deduplication. Columns: {local_df_questions.columns}")
+
+    # *** FIXED: Process 'q_idx' column safely ***
+    try:
+        # Now this should reliably select a Series
+        q_idx_series = local_df_questions['q_idx']
+
+        # Ensure integer type
+        if not pd.api.types.is_integer_dtype(q_idx_series):
+            print("  Converting 'q_idx' column to integer type.")
+            local_df_questions['q_idx'] = q_idx_series.astype(int)
+            q_idx_series = local_df_questions['q_idx'] # Re-assign Series after type change
+
+        # Check for uniqueness using the Series attribute
+        if not q_idx_series.is_unique:
+            print("  Warning: 'q_idx' column contains duplicates. Keeping first occurrence.")
+            # Important: drop_duplicates returns a new DataFrame
+            local_df_questions = local_df_questions.drop_duplicates(subset=['q_idx'], keep='first')
+            print(f"    Dropped duplicates, {len(local_df_questions)} unique questions remaining in local copy.")
+
+    except AttributeError as e_attr:
+        print(f"ERROR: An AttributeError occurred while processing 'q_idx'. This likely means it's not a Series.")
+        print(f"       Type of local_df_questions['q_idx']: {type(local_df_questions['q_idx'])}")
+        print(f"       Original Error: {e_attr}")
+        raise ValueError("Failed to prepare 'q_idx' column (AttributeError).") from e_attr
+    except Exception as e:
+        print(f"ERROR: Could not process 'q_idx' column (convert to int or check uniqueness). Error: {e}")
+        traceback.print_exc()
+        raise ValueError("Failed to prepare 'q_idx' column in input questions.") from e
+
+
+    # --- Handle Subset ---
     if subset_fraction < 1.0:
-        print(f"Answering a random subset of {subset_fraction*100:.1f}% of questions.")
-        df_questions_subset = df_questions.sample(frac=subset_fraction, random_state=random_seed)
+        print(f"  Answering a random subset of {subset_fraction*100:.1f}% of questions.")
+        # Sample from the cleaned DataFrame
+        df_questions_subset = local_df_questions.sample(frac=subset_fraction, random_state=random_seed)
+        print(f"  Subset size: {len(df_questions_subset)} questions.")
     else:
-        df_questions_subset = df_questions
+        df_questions_subset = local_df_questions
 
-    # results_list = [] # REMOVED: We will build the final DataFrame differently
-    processed_rows = [] # ADDED: List to store processed rows (as dicts or Series)
-    total_questions = len(df_questions_subset)
-    print(f"Processing {total_questions} questions...")
+    # --- Check Cache and Prepare API Calls ---
+    processed_rows = [] # List to store results (as dicts) from cache or worker
+    tasks_to_run: List[Tuple[int, str]] = []   # List of tuples (q_idx, question) for worker
+    total_questions_in_subset = len(df_questions_subset)
+    print(f"  Checking cache for {total_questions_in_subset} questions...")
 
-    # Pre-fetch benchmark parameters
+    # Pre-fetch benchmark parameters for path generation
     nb_chapters = my_benchmark.nb_chapters()
     nb_tokens = my_benchmark.nb_tokens()
     prompt_parameters = my_benchmark.prompt_parameters
     model_parameters = my_benchmark.model_parameters
     book_parameters = my_benchmark.book_parameters
 
-    # --- Prepare tasks for uncached questions --- 
-    tasks_to_run = []
-    uncached_indices = [] # Keep track of original index for matching results
-    uncached_output_paths = []
-    cached_rows = [] # Store rows loaded from cache
-
-    # --- Define async helper for API call (moved outside loop) ---
-    async def run_local_search_task(query_text: str):
-        # This function now only wraps the API call for gather
-        # Error handling will happen when processing gather results
-        return await api.local_search(
-            config=graphrag_config,
-            entities=entities,
-            communities=communities,
-            community_reports=community_reports,
-            text_units=text_units,
-            relationships=relationships,
-            covariates=covariates, 
-            query=query_text,
-            community_level=community_level,
-            response_type="Multiple Paragraphs" 
-        )
-
-    print("  Checking cache and preparing tasks...")
-    # --- First Pass: Check cache and prepare tasks/cached data ---
     for i, row in df_questions_subset.iterrows():
-        q_idx = row['q_idx']
-        question = row['question']
-        
-        # Calculate output path using the original index 'i' from the subsetted df
+        # q_idx should now be a scalar int because we cleaned the DataFrame above
+        q_idx = int(row['q_idx']) # Ensure int
+        question = str(row['question']) # Ensure str
+
         output_filepath = answer_filepath_func(
-            q=i, nb_chapters=nb_chapters, nb_tokens=nb_tokens, data_folder=data_folder,
+            q=q_idx, # Use the unique question identifier
+            nb_chapters=nb_chapters, nb_tokens=nb_tokens, data_folder=data_folder,
             prompt_parameters=prompt_parameters, model_parameters=model_parameters,
             book_parameters=book_parameters, answering_parameters=answering_parameters
         )
 
         if output_filepath.is_file():
-            # Load from cache
+            # print(f"  Answer file already exists: {output_filepath}")
             try:
                 answer = import_list(output_filepath)
                 retrieved_context = "Context not retrieved (answer loaded from cache)"
-                print(f"  Q{i+1}/{total_questions} (ID: {q_idx}): Loaded from cache.")
-                # Store the complete row data
-                cached_row_data = row.to_dict()
-                cached_row_data['llm_answer'] = str(answer)
-                cached_row_data['retrieved_context'] = retrieved_context
-                cached_rows.append(cached_row_data)
+                # Append cached result directly
+                processed_row_data = {
+                    'q_idx': q_idx,
+                    'question': question,
+                    'llm_answer': str(answer) if answer is not None else "Processing Skipped/Failed",
+                    'retrieved_context': str(retrieved_context)
+                }
+                processed_rows.append(processed_row_data)
             except Exception as e:
-                print(f"  Q{i+1}/{total_questions} (ID: {q_idx}): Error reading cache {output_filepath}: {e}. Will regenerate.")
-                # Prepare task for regeneration if cache read fails
-                tasks_to_run.append(run_local_search_task(question))
-                uncached_indices.append(i) # Use original index 'i'
-                uncached_output_paths.append(output_filepath)
+                print(f"  WARNING: Error reading cached answer file {output_filepath}: {e}")
+                print(f"           Skipping generation for Q_ID {q_idx} due to cache read error.")
+                # Append error entry instead of adding to tasks_to_run
+                processed_row_data = {
+                    'q_idx': q_idx,
+                    'question': question,
+                    'llm_answer': "Error reading cached answer",
+                    'retrieved_context': "Context unavailable (cache read error)"
+                }
+                processed_rows.append(processed_row_data)
         else:
-            # Prepare task for generation
-            print(f"  Q{i+1}/{total_questions} (ID: {q_idx}): Needs generation.")
-            tasks_to_run.append(run_local_search_task(question))
-            uncached_indices.append(i) # Use original index 'i'
-            uncached_output_paths.append(output_filepath)
+            # Not cached, add to list for API call
+            tasks_to_run.append((q_idx, question))
 
-    # --- Run uncached queries concurrently --- 
-    newly_processed_rows = []
-    if tasks_to_run:
-        print(f"  Running {len(tasks_to_run)} queries concurrently using asyncio.gather...")
-        start_gather_time = time.time()
+    num_queries = len(tasks_to_run)
+    print(f"  {num_queries} questions require generation.")
 
-        async def run_gather():
-            # Use return_exceptions=True to handle errors in individual tasks
-            return await asyncio.gather(*tasks_to_run, return_exceptions=True)
+    generated_results = []
+    if num_queries > 0:
+        # --- ASYNC EXECUTION SETUP ---
+        async def main_async(tasks_to_run_async: List[Tuple[int, str]]):
+            semaphore = asyncio.Semaphore(max_workers)
+            tasks = []
+            for q_idx_async, question_async in tasks_to_run_async:
+                # Pass all necessary components to the worker task creator
+                task = process_single_question_graphrag(
+                    q_idx=q_idx_async,
+                    question=question_async,
+                    graphrag_config=graphrag_config,
+                    entities=entities,
+                    communities=communities,
+                    community_reports=community_reports,
+                    text_units=text_units,
+                    relationships=relationships,
+                    covariates=covariates,
+                    nb_chapters=nb_chapters,
+                    nb_tokens=nb_tokens,
+                    data_folder=data_folder,
+                    prompt_parameters=prompt_parameters,
+                    model_parameters=model_parameters,
+                    book_parameters=book_parameters,
+                    answering_parameters=answering_parameters,
+                    community_level=community_level,
+                    semaphore=semaphore
+                )
+                tasks.append(task)
 
-        # Run the gather operation
-        results = asyncio.run(run_gather())
-        
-        end_gather_time = time.time()
-        print(f"  Finished {len(tasks_to_run)} queries in {end_gather_time - start_gather_time:.2f} seconds.")
+            print(f"  Running {len(tasks)} GraphRAG queries concurrently (max {max_workers} workers)... ")
+            results = await asyncio.gather(*tasks)
+            print(f"  Finished running {len(tasks)} concurrent queries.")
+            return results
 
-        # --- Process results and save --- 
-        print("  Processing and saving results...")
-        for idx, result in enumerate(results):
-            original_index = uncached_indices[idx]
-            output_filepath = uncached_output_paths[idx]
-            row_data = df_questions_subset.loc[original_index].to_dict() # Get original row data using index
-            q_idx = row_data['q_idx'] # Get q_idx for messages
+        # --- Run the async main function ---
+        generated_results = asyncio.run(main_async(tasks_to_run))
 
-            answer = None
-            retrieved_context = None
+    # Combine cached results and newly generated results
+    processed_rows.extend(generated_results) # generated_results is already a list of dicts
 
-            if isinstance(result, Exception):
-                # Handle exceptions returned by gather
-                print(f"  ERROR during GraphRAG query for Q index {original_index} (ID: {q_idx}): {result}")
-                answer = f"Error during GraphRAG query: {result}"
-                retrieved_context = f"Error during GraphRAG processing: {result}"
-            else:
-                # Unpack successful result
-                try:
-                    answer, retrieved_context = result
-                    print(f"    Q index {original_index} (ID: {q_idx}) Answer (preview): {str(answer)[:100]}...")
-                    # Save the newly generated answer
-                    answer_to_save = str(answer) if answer is not None else "Processing Skipped/Failed"
-                    try:
-                        output_filepath.parent.mkdir(parents=True, exist_ok=True)
-                        export_list(answer_to_save, output_filepath)
-                        # print(f"    Successfully saved answer to: {output_filepath}")
-                    except Exception as e:
-                        print(f"    Error saving answer for Q index {original_index} (ID: {q_idx}) to JSON: {e}")
-                except Exception as unpack_error:
-                     print(f"  ERROR unpacking result for Q index {original_index} (ID: {q_idx}): {unpack_error}")
-                     answer = f"Error unpacking result: {unpack_error}"
-                     retrieved_context = "Error unpacking result"
-
-            # Append the processed row data
-            row_data['llm_answer'] = str(answer) if answer is not None else "Processing Skipped/Failed"
-            row_data['retrieved_context'] = str(retrieved_context) if retrieved_context is not None else "Context Unavailable"
-            newly_processed_rows.append(row_data)
+    # Create results DataFrame for the processed subset
+    if processed_rows:
+        df_results = pd.DataFrame(processed_rows)
     else:
-        print("  No queries needed to run (all answers found in cache).")
+        # Handle case where subset was 0 or all were cached
+        df_results = pd.DataFrame(columns=['q_idx', 'llm_answer', 'retrieved_context'])
 
-    # Combine cached and newly processed rows
-    all_processed_rows = cached_rows + newly_processed_rows
+
+    # --- Final Merge & Return ---
+    # (Merge logic remains largely the same, ensuring 'q_idx' is handled correctly)
+    if subset_fraction < 1.0:
+        print("  Merging subset results back with original questions...")
+        # Make a copy of the original, *uncleaned* df_questions
+        df_questions_final = df_questions.copy()
+
+        # --- Clean df_questions_final before merge (ensure q_idx column) ---
+        if 'q_idx' not in df_questions_final.columns:
+            if df_questions_final.index.name == 'q_idx':
+                df_questions_final = df_questions_final.reset_index()
+                print("    Reset index 'q_idx' to column in df_questions_final.")
+            else:
+                # This case should have been caught earlier, but double-check
+                raise ValueError("Original df_questions must have a 'q_idx' column or index name for merging.")
+
+        # Ensure q_idx is int in the original df for merging
+        try:
+            if 'q_idx' in df_questions_final.columns:
+                 df_questions_final['q_idx'] = df_questions_final['q_idx'].astype(int)
+            else:
+                 raise ValueError("Critical error: 'q_idx' column missing in df_questions_final before merge.")
+        except Exception as e:
+             raise ValueError(f"Could not convert 'q_idx' to int in df_questions_final before merge: {e}") from e
+
+        # Drop potential duplicate 'q_idx' columns if they arose, keeping the first
+        df_questions_final = df_questions_final.loc[:, ~df_questions_final.columns.duplicated(keep='first')]
+
+        # Check uniqueness *after* ensuring it's an int column
+        # No need to drop here, merge 'left' handles it, but warn if needed.
+        if not df_questions_final['q_idx'].is_unique:
+             print("  Warning: 'q_idx' in original df_questions is not unique before merge. Merge might be ambiguous.")
+
+
+        # --- Clean df_results before merge (ensure q_idx column and type) ---
+        if not df_results.empty:
+            if 'q_idx' not in df_results.columns:
+                 raise ValueError("Internal Error: df_results missing 'q_idx' column after processing.")
+
+            # Ensure q_idx is integer type (should be already from worker)
+            try:
+                df_results['q_idx'] = df_results['q_idx'].astype(int)
+            except Exception as e:
+                raise ValueError(f"Could not convert 'q_idx' to int in df_results before merge: {e}") from e
+
+            # Drop potential duplicate 'q_idx' columns from results (shouldn't happen if pre-cleaning worked)
+            if not df_results['q_idx'].is_unique:
+                print("  Warning: 'q_idx' in df_results is not unique before merge. Dropping duplicates based on 'q_idx'.")
+                df_results = df_results.drop_duplicates(subset=['q_idx'], keep='first')
+        else: # If df_results is empty (e.g., all subset cached), prepare for merge
+             df_results = pd.DataFrame(columns=['q_idx', 'llm_answer', 'retrieved_context']) # Create empty df with needed cols
+
+        # Select only the new columns generated by this function from df_results
+        merge_cols = ['q_idx']
+        placeholder_row = {}
+        if 'llm_answer' in df_results.columns:
+            merge_cols.append('llm_answer')
+            placeholder_row['llm_answer'] = "Not Processed (Subset)"
+        if 'retrieved_context' in df_results.columns:
+            merge_cols.append('retrieved_context')
+            placeholder_row['retrieved_context'] = "Not Processed (Subset)"
+
+        # Ensure merge_cols are unique
+        merge_cols = list(dict.fromkeys(merge_cols))
+        df_results_to_merge = df_results[merge_cols]
+
+        # Perform the merge, keeping all original questions
+        df_final = pd.merge(df_questions_final, df_results_to_merge, on='q_idx', how='left') # indicator=True is useful for debugging
+
+        # Explicitly fill NaN values in the new columns for rows not in the subset
+        for col, fill_val in placeholder_row.items():
+             if col in df_final.columns: # Check if column exists after merge
+                 # Fillna is generally safer than .loc for this
+                 df_final[col] = df_final[col].fillna(fill_val)
+             else: # Should not happen if merge_cols logic is correct
+                  print(f"  Warning: Column '{col}' expected but not found after merge. Adding with fill value.")
+                  df_final[col] = fill_val
+
+
+    else:
+        # No subsetting - df_results should contain all questions
+        df_final = df_results # Use the results directly
+
+    # Final check to ensure required columns exist even if generation failed completely
+    if df_final.empty and not df_questions.empty:
+         # If we started with questions but ended with empty results, return original questions + placeholders
+         print("Warning: Final DataFrame was empty after processing, returning original questions structure with placeholders.")
+         df_final = df_questions.copy() # Use original df_questions again
+         # Ensure q_idx is a column here too
+         if 'q_idx' not in df_final.columns and df_final.index.name == 'q_idx':
+             df_final = df_final.reset_index()
+         # Add placeholder columns if missing
+         if 'llm_answer' not in df_final.columns:
+             df_final['llm_answer'] = "Processing Skipped/Failed"
+         if 'retrieved_context' not in df_final.columns:
+             df_final['retrieved_context'] = "Context Unavailable"
+    elif not df_final.empty:
+         # Ensure placeholder columns exist if they were somehow missed
+         if 'llm_answer' not in df_final.columns:
+              df_final['llm_answer'] = "Processing Skipped/Failed"
+         if 'retrieved_context' not in df_final.columns:
+              df_final['retrieved_context'] = "Context Unavailable"
+
 
     end_time = time.time()
     print(f"GraphRAG answer generation finished in {end_time - start_time:.2f} seconds.")
-
-    # --- Create final DataFrame --- 
-    if not all_processed_rows:
-        print("Warning: No rows were processed (cached or generated). Returning empty DataFrame structure.")
-        # Return original columns plus the ones we expect to add
-        final_columns = list(df_questions.columns) + ['llm_answer', 'retrieved_context']
-        df_final = pd.DataFrame(columns=final_columns)
-    else:
-        df_results = pd.DataFrame(all_processed_rows)
-
-        # If subsetting was used, merge back with original to ensure all questions are present
-        if subset_fraction < 1.0:
-            merge_cols = list(df_results.columns) # Use all columns from results
-            # Ensure original df_questions has a unique index if it wasn't already
-            if not df_questions.index.is_unique:
-                 df_questions = df_questions.reset_index(drop=True)
-            # Merge, keeping all original questions. Use suffixes to handle potential column conflicts (though unlikely now)
-            df_final = pd.merge(df_questions, df_results[merge_cols], on='q_idx', how='left', suffixes=('', '_new'))
-            # Clean up potential duplicated columns if merge added suffixes unexpectedly (shouldn't happen with on='q_idx')
-            # Example: if 'question_new' exists, drop it if 'question' exists.
-            cols_to_drop = [col for col in df_final.columns if col.endswith('_new')]
-            df_final = df_final.drop(columns=cols_to_drop)
-
-        else:
-            df_final = df_results # No merge needed if all questions were processed
-
-    # Ensure required columns exist even if generation failed completely or no rows processed
-    if 'llm_answer' not in df_final.columns:
-         df_final['llm_answer'] = "Processing Skipped/Failed"
-    if 'retrieved_context' not in df_final.columns:
-         df_final['retrieved_context'] = "Context Unavailable"
 
     return df_final 

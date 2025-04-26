@@ -102,7 +102,9 @@ class EvaluationWrapper:
                 env_file=env_file,
                 my_benchmark=my_benchmark,
                 answering_parameters=self.answering_parameters, # Pass the whole dict
-                data_folder=data_folder # Needed for constructing answer file paths inside generator
+                data_folder=data_folder, # Needed for constructing answer file paths inside generator
+                subset_fraction=self.answering_parameters.get('subset_fraction', 1.0),
+                random_seed=self.answering_parameters.get('random_seed', 42)
             )
             # REMOVED: The raw dataframe and merge step are no longer needed
             # df_generated_answers_raw = generate_answers_graphrag(...)
@@ -209,40 +211,69 @@ class EvaluationWrapper:
 
             # 5. answer the questions
             answering_parameters['model_name'] = answering_parameters['fine_tuned_model_name']
-            #print(answering_parameters['model_name'])
-            self.df_generated_answers = generate_answers_func(my_benchmark, answering_parameters, data_folder, env_file)
+             #print(answering_parameters['model_name'])
+
+            # NOTE: ftuning currently doesn't support subset_fraction, so we generate all answers
+            self.df_generated_answers = generate_answers_func(my_benchmark, answering_parameters, data_folder, env_file, my_embedding=None)
 
         else:
             raise ValueError('unknown "kind", should be "prompting", "rag" or "ftuning"')
         
         # Print answer statistics
         if self.df_generated_answers.empty:
-            print("Warning: No answers were generated. Skipping evaluation and chronological steps.")
+            print("\nWarning: No answers were generated. Skipping evaluation and chronological steps.")
             self.df_generated_evaluations = pd.DataFrame()
             self.df_generated_chronological = pd.DataFrame()
             self.kendall_summaries_for_this_experiment = pd.DataFrame()
         else:
-            total_questions = len(self.df_generated_answers)
-            answered_questions = self.df_generated_answers['llm_answer'].count()
-            print(f"Generated answers for {answered_questions}/{total_questions} questions ({answered_questions/total_questions*100:.1f}%)")
-            
+            total_questions_in_benchmark = len(my_benchmark.get_df_qa())
+            # Filter out rows where answers were not generated (None or specific placeholders)
+            # Common placeholders: "Not Processed (Subset)", "Error reading cached answer", None
+            placeholders = ["Not Processed (Subset)", "Error reading cached answer"]
+            df_answers_to_evaluate = self.df_generated_answers[
+                self.df_generated_answers['llm_answer'].notna() &
+                ~self.df_generated_answers['llm_answer'].isin(placeholders)
+            ].copy()
+ 
+            answered_questions = len(df_answers_to_evaluate)
+            if 'subset_fraction' in answering_parameters and answering_parameters['subset_fraction'] < 1.0:
+                 total_questions_expected = len(self.df_generated_answers) # Should reflect the subset size if merge worked
+                 print(f"\nGenerated answers for {answered_questions}/{total_questions_expected} questions in the subset.")
+            else:
+                 print(f"\nGenerated answers for {answered_questions}/{total_questions_in_benchmark} total questions ({answered_questions/total_questions_in_benchmark*100:.1f}%)")
+ 
+            if answered_questions == 0:
+                 print("Warning: No valid answers found to evaluate. Skipping evaluation and chronological steps.")
+                 self.df_generated_evaluations = pd.DataFrame()
+                 self.df_generated_chronological = pd.DataFrame()
+                 self.kendall_summaries_for_this_experiment = pd.DataFrame()
+                 return # Exit init early
+              
             # generated evaluation (given answers)
-            df_generated_evaluations = generate_evaluation_func(my_benchmark, self.df_generated_answers, answering_parameters, data_folder, env_file)
+            # Pass only the successfully answered questions to the evaluation function
+            print(f"\nStarting evaluation for {answered_questions} answered questions...")
+            df_generated_evaluations_subset = generate_evaluation_func(my_benchmark, df_answers_to_evaluate, answering_parameters, data_folder, env_file)
             # possibly with a different policy for the final evaluation
-            self.df_generated_evaluations = update_policy_of_evaluation_to(df_generated_evaluations, self.policy)
-            
+            self.df_generated_evaluations = update_policy_of_evaluation_to(df_generated_evaluations_subset, self.policy)
+              
             # Print evaluation statistics
             total_evaluations = len(self.df_generated_evaluations)
-            print(f"Generated evaluations for {total_evaluations}/{answered_questions} answered questions")
-
+            print(f"Finished evaluation. Generated evaluations for {total_evaluations}/{answered_questions} answered questions.")
+            if total_evaluations < answered_questions:
+                 print(f"  Warning: Some answered questions ({answered_questions - total_evaluations}) might have failed during evaluation.")
+  
             # generated chronological (given evaluation)
+            # Pass the evaluated subset to the chronological function
+            print("\nStarting chronological evaluation...")
             df_generated_chronological = generate_chronological_func(my_benchmark, self.df_generated_evaluations, answering_parameters, data_folder, env_file)
             self.df_generated_chronological = df_generated_chronological
             
             # Print chronological statistics
             if len(df_generated_chronological) > 0:
-                print(f"Generated chronological evaluations for {len(df_generated_chronological)} questions")
-            
+                num_chrono_evaluated = len(df_generated_chronological)
+                num_chrono_possible = len(self.df_generated_evaluations[self.df_generated_evaluations['get'] == 'chronological']) # Count possible chrono qs in evaluated subset
+                print(f"Finished chronological evaluation. Generated evaluations for {num_chrono_evaluated}/{num_chrono_possible} applicable questions.")
+              
             self.kendall_summaries_for_this_experiment = self.compute_kendall_summarise(df_generated_chronological, verbose = False)
 
     def cancel_job(self, ftjob_id = 'ftjob-wjldwdkjw0eiw'):
