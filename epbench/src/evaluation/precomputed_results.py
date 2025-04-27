@@ -123,7 +123,30 @@ def get_precomputed_results(experiments,
                     answering_parameters['fine_tuned_model_name'] = 'ft:gpt-4o-2024-08-06:personal::DISCARDED' # DISCARDED (~400 dollars)
                 else:
                     raise ValueError('only done for gpt4o and gpt4o-mini')
-                    
+        elif df_cur['answering_kind'] == 'graphrag':
+            answering_parameters = {
+                'kind': 'graphrag',
+                'model_name': df_cur['answering_model_name'],
+                'max_new_tokens': 4096, # Assuming default
+                'sleeping_time': 0,     # Assuming default
+                'policy': evaluation_policy
+            }
+            # Construct the default graphrag_index_dir based on the benchmark dir
+            # Requires 'my_benchmark' to be correctly set earlier in the loop
+            from pathlib import Path # Ensure Path is imported if not already
+            graphrag_dir = my_benchmark.get_benchmark_dirpath()
+            print(f"  Auto-detecting GraphRAG index directory: {graphrag_dir}")
+            if not graphrag_dir.is_dir():
+                # Maybe raise an error or just warn, depending on expected setup
+                print(f"  Warning: Auto-detected GraphRAG index directory does not exist: {graphrag_dir}")
+            answering_parameters['graphrag_index_dir'] = str(graphrag_dir.resolve())
+        else:
+            answering_parameters = {'kind': df_cur['answering_kind'], 
+                                    'model_name': df_cur['answering_model_name'], 
+                                    'max_new_tokens': 4096, 
+                                    'sleeping_time': 0,
+                                    'policy': evaluation_policy}
+        
         # Add subset_fraction and random_seed if they exist in the experiment)
         if 'subset_fraction' in df_cur:
             answering_parameters['subset_fraction'] = float(df_cur['subset_fraction'])
