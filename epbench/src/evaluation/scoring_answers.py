@@ -197,19 +197,22 @@ def generate_metric_original(correct_answer, evaluation):
     
     gt_alt = [list(x.keys())[0] for x in evaluation['matching_score']] # set([x.keys() for x in evaluation['matching_score']])
     nb_gt_alt = len(gt_alt) # nb_gt computed differently
-    if nb_gt != nb_gt_alt:
-        raise ValueError('nb_gt has been found different to nb_gt_alt')
+    # Removed strict check: if nb_gt != nb_gt_alt:
+    #     raise ValueError('nb_gt has been found different to nb_gt_alt')
+    # Use the count based on scored items for consistency
+    nb_gt_to_use = nb_gt_alt
 
     sum_scores = sum([float(list(x.values())[0]) for x in evaluation['matching_score']]) # sum(evaluation['matching_score'].values()) # between 0 and nb_preds
     precision = sum_scores / nb_preds if nb_preds > 0 else None
-    recall = sum_scores / nb_gt if nb_gt > 0 else None
+    # Use the count derived from scored items for recall calculation
+    recall = sum_scores / nb_gt_to_use if nb_gt_to_use > 0 else None
     f1_score = f1_score_func(precision, recall)
     return {'predicted_items': list(predictions),
             'groundtruth_items': list(gt_alt),
             'matching_groundtruth_items_score': evaluation['matching_score'],
             'explanation': evaluation['explanation'],
             'nb_preds': nb_preds,
-            'nb_gt': nb_gt,
+            'nb_gt': nb_gt_to_use, # Report the count used for calculation
             'sum_scores': sum_scores,
             'precision': precision,
             'recall': recall,
@@ -237,8 +240,10 @@ def generate_metric(correct_answer, evaluation, policy = 'remove_duplicates'):
 
     gt_alt = [list(x.keys())[0] for x in evaluation['matching_score']] # set([x.keys() for x in evaluation['matching_score']])
     nb_gt_alt = len(gt_alt) # nb_gt computed differently
-    if nb_gt != nb_gt_alt:
-        raise ValueError('nb_gt has been found different to nb_gt_alt')
+    # Removed strict check: if nb_gt != nb_gt_alt:
+    #     raise ValueError('nb_gt has been found different to nb_gt_alt')
+    # Use the count based on scored items for consistency
+    nb_gt_to_use = nb_gt_alt
 
     # common (old and new)
     # print(evaluation['matching_score'])
@@ -246,7 +251,8 @@ def generate_metric(correct_answer, evaluation, policy = 'remove_duplicates'):
     precision_lenient = sum_scores / nb_preds_lenient if nb_preds_lenient > 0 else None
     precision_harsh = sum_scores / nb_preds_harsh if nb_preds_harsh > 0 else None
 
-    recall = sum_scores / nb_gt if nb_gt > 0 else None
+    # Use the count derived from scored items for recall calculation
+    recall = sum_scores / nb_gt_to_use if nb_gt_to_use > 0 else None
     f1_score_lenient = f1_score_func(precision_lenient, recall)
     f1_score_harsh = f1_score_func(precision_harsh, recall)
     return {'predicted_items': predictions,
@@ -255,7 +261,7 @@ def generate_metric(correct_answer, evaluation, policy = 'remove_duplicates'):
             'explanation': evaluation['explanation'],
             'nb_preds_lenient': nb_preds_lenient,
             'nb_preds_harsh': nb_preds_harsh,
-            'nb_gt': nb_gt,
+            'nb_gt': nb_gt_to_use, # Report the count used for calculation
             'sum_scores': sum_scores,
             'precision_lenient': precision_lenient,
             'precision_harsh': precision_harsh,

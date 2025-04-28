@@ -49,6 +49,8 @@ def get_short_name2(tuple_input):
             output = f"{model_name}\n(rag)"
     elif tuple_input[0] == 'ftuning':
         output = f"{model_name}\n(ftuning)"
+    elif tuple_input[0] == 'graphrag':
+        output = f"{model_name}\n(graphrag)"
     return output
 
 def plot_clust(df, nb_events, relative_to, figsize=(16, 20), only_bins = None):
@@ -83,10 +85,13 @@ def plot_clust(df, nb_events, relative_to, figsize=(16, 20), only_bins = None):
         available_columns = ['get', 'bins_items_correct_answer', 'cue']
         # Add model columns in preferred order
         model_columns = [
-            'gpt-4o', 'gpt-4.1',
-            'llama-4-scout', 'llama-4-maverick',
-            'gemini-2.5'
+            'gpt-4o-mini', 'gpt-4o-mini (graphrag)',
         ]
+        # model_columns = [
+        #     'gpt-4o', 'gpt-4.1',
+        #     'llama-4-scout', 'llama-4-maverick',
+        #     'gemini-2.5'
+        # ]
         
         # Filter to only include columns that exist in the data
         existing_model_columns = [col for col in model_columns if col in data.columns]
