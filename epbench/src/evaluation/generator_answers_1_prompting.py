@@ -10,6 +10,10 @@ import os
 import pandas as pd
 import re
 import time
+import concurrent.futures
+from functools import partial
+import threading
+import numpy as np
 
 def check_and_remove(book, substring, error_if_not_found = True):
     count = book.count(substring)
@@ -77,12 +81,87 @@ In that moment of shared horror, Mila realized the tragic irony of her carefully
     book = check_and_remove(book, substring25)
     return book
 
-def whether_do_this_q(q, q_max):
-    if q_max is None:
-        return True
-    else:
+def whether_do_this_q(q, q_max, selected_indices=None):
+    if selected_indices is not None:
+        return q in selected_indices
+    elif q_max is not None:
         return (q < q_max)
+    else:
+        return True
             
+def process_single_question(q, df_qa, book, nb_chapters, nb_tokens, data_folder, prompt_parameters, 
+                           model_parameters, book_parameters, answering_parameters, my_embedding, my_benchmark,
+                           env_file):
+    model_name = answering_parameters['model_name']
+    max_new_tokens = answering_parameters['max_new_tokens']
+    system_prompt = "You are an expert in memory tests."
+    sleeping_time = answering_parameters['sleeping_time']
+    
+    config = SettingsWrapper(_env_file = env_file)
+    
+    answer_filepath = answer_filepath_func(q, nb_chapters, nb_tokens, data_folder, prompt_parameters, model_parameters, book_parameters, answering_parameters)
+    answer_reasoning_filepath = answer_reasoning_filepath_func(q, nb_chapters, nb_tokens, data_folder, prompt_parameters, model_parameters, book_parameters, answering_parameters)
+    
+    if not answer_filepath.is_file():
+        question = df_qa.iloc[q]['question']
+        correct_answer = df_qa.iloc[q]['correct_answer']
+        print(f"Generate {str(q)} / {str(len(df_qa)-1)} [{correct_answer}for question {question}]")
+        
+        # Initialize model for this worker
+        my_model = ModelsWrapper(model_name, config)
+        
+        # generate the content
+        if answering_parameters['kind'] == 'prompting': # context, my_embedding is None
+            user_prompt = generate_episodic_memory_prompt(book, question)
+        elif answering_parameters['kind'] == 'rag': # rag, there is an embedding
+            user_prompt = query_message(question, my_embedding, answering_parameters, env_file)
+        elif answering_parameters['kind'] == 'ftuning':
+            user_prompt = my_benchmark.get_user_prompt_for_finetuning(question)
+            
+        if q == 0:
+            print("[begin example of a prompt]")
+            print(user_prompt)
+            print("[end example of a prompt]")
+            
+        out, reasoning = my_model.generate(user_prompt = user_prompt, system_prompt = system_prompt, max_new_tokens = max_new_tokens, keep_reasoning = True)
+        
+        # Use a thread lock for printing to avoid garbled output
+        with print_lock:
+            print(f"Sleeping for {sleeping_time} seconds for question {q}")
+        time.sleep(sleeping_time)
+        with print_lock:
+            print(f"Woke up from processing question {q}")
+        
+        # Create directory and save answer
+        try:
+            answer_filepath.parent.mkdir(parents=True, exist_ok=True)
+            with print_lock:
+                print(f"Saving answer to: {answer_filepath}")
+            export_list(out, answer_filepath)
+            if not answer_filepath.is_file():
+                print(f"WARNING: Answer file was not created successfully: {answer_filepath}")
+            else:
+                print(f"Successfully saved answer for question {q}")
+                
+            # Save reasoning if available
+            if reasoning is not None:
+                answer_reasoning_filepath.parent.mkdir(parents=True, exist_ok=True)
+                with print_lock:
+                    print(answer_reasoning_filepath)
+                export_list(reasoning, answer_reasoning_filepath)
+        except Exception as e:
+            print(f"ERROR saving answer for question {q}: {e}")
+    else:
+        print(f"Answer file already exists for question {q}: {answer_filepath}")
+    
+    # Verify file exists before trying to read it
+    if not answer_filepath.is_file():
+        print(f"ERROR: Cannot read answer file for question {q} - file doesn't exist: {answer_filepath}")
+        return None
+        
+    generated_answer = import_list(answer_filepath)
+    return generated_answer
+
 def generate_answers_func(
     my_benchmark: BenchmarkGenerationWrapper,
     answering_parameters = {'kind': 'prompting', 'model_name': 'claude-3-5-sonnet-20240620', 'max_new_tokens': 4096, 'sleeping_time': 15},
@@ -101,6 +180,7 @@ def generate_answers_func(
     sleeping_time = answering_parameters['sleeping_time']
     
     config = SettingsWrapper(_env_file = env_file)
+    max_workers = config.MAX_WORKERS  # Get max_workers from settings
 
     book = my_benchmark.get_book()
     if answering_parameters['model_name'] == 'llama-3.1-405b-instruct':
@@ -113,44 +193,72 @@ def generate_answers_func(
     nb_chapters = my_benchmark.nb_chapters()
     nb_tokens = my_benchmark.nb_tokens()
 
-    # loop
-    generated_answers = []
-    for q in range(len(df_qa)):
-        answer_filepath = answer_filepath_func(q, nb_chapters, nb_tokens, data_folder, prompt_parameters, model_parameters, book_parameters, answering_parameters)
-        answer_reasoning_filepath = answer_reasoning_filepath_func(q, nb_chapters, nb_tokens, data_folder, prompt_parameters, model_parameters, book_parameters, answering_parameters)
-        if not answer_filepath.is_file():
-            question = df_qa.iloc[q]['question']
-            correct_answer = df_qa.iloc[q]['correct_answer']
-            print(f"Generate {str(q)} / {str(len(df_qa)-1)} [{correct_answer}for question {question}]")
-            # only initialize the model if needed, and only initialize it once 
+    # Handle subset fraction if provided
+    selected_indices = None
+    if 'subset_fraction' in answering_parameters and answering_parameters['subset_fraction'] < 1.0:
+        subset_fraction = answering_parameters['subset_fraction']
+        
+        # Get random seed from parameters or use default
+        random_seed = answering_parameters.get('random_seed', 42)
+        
+        # Group questions by retrieval_type (time, space, entity, content)
+        grouped = df_qa.groupby('retrieval_type')
+        selected_indices = []
+        
+        # For each group, select a subset of indices based on the fraction
+        for retrieval_type, group in grouped:
+            group_indices = group.index.tolist()
+            # Calculate how many questions to select from this group
+            n_select = max(1, int(len(group_indices) * subset_fraction))
+            # Randomly select indices from this group
+            np.random.seed(random_seed)  # For reproducibility
+            selected_from_group = np.random.choice(group_indices, size=n_select, replace=False)
+            selected_indices.extend(selected_from_group)
+        
+        # Sort the indices to maintain original order
+        selected_indices.sort()
+        print(f"Selected {len(selected_indices)}/{len(df_qa)} questions ({subset_fraction*100:.1f}%) for answering")
+        print(f"Using random seed: {random_seed} for selection")
+
+    # Create a lock for thread-safe printing
+    global print_lock
+    print_lock = threading.Lock()
+    
+    # Create a partial function with fixed parameters
+    process_func = partial(
+        process_single_question,
+        df_qa=df_qa,
+        book=book,
+        nb_chapters=nb_chapters,
+        nb_tokens=nb_tokens,
+        data_folder=data_folder,
+        prompt_parameters=prompt_parameters,
+        model_parameters=model_parameters,
+        book_parameters=book_parameters,
+        answering_parameters=answering_parameters,
+        my_embedding=my_embedding,
+        my_benchmark=my_benchmark,
+        env_file=env_file
+    )
+    
+    # Run with parallel workers
+    generated_answers = [None] * len(df_qa)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Submit tasks only for selected indices
+        future_to_index = {}
+        for q in range(len(df_qa)):
+            if whether_do_this_q(q, None, selected_indices):
+                future_to_index[executor.submit(process_func, q)] = q
+        
+        # Process results as they complete
+        for future in concurrent.futures.as_completed(future_to_index):
+            q = future_to_index[future]
             try:
-                my_model
-            except NameError:
-                my_model = ModelsWrapper(model_name, config)
-            # generate the content
-            if answering_parameters['kind'] == 'prompting': # context, my_embedding is None
-                user_prompt = generate_episodic_memory_prompt(book, question)
-            elif answering_parameters['kind'] == 'rag': # rag, there is an embedding
-                user_prompt = query_message(question, my_embedding, answering_parameters, env_file)
-            elif answering_parameters['kind'] == 'ftuning':
-                user_prompt = my_benchmark.get_user_prompt_for_finetuning(question)
-            if q == 0:
-                print("[begin example of a prompt]")
-                print(user_prompt)
-                print("[end example of a prompt]")
-            out, reasoning = my_model.generate(user_prompt = user_prompt, system_prompt = system_prompt, max_new_tokens = max_new_tokens, keep_reasoning = True)
-            print(f"sleeping for {sleeping_time} seconds")
-            time.sleep(sleeping_time)
-            print("woke up")
-            answer_filepath.parent.mkdir(parents=True, exist_ok=True)
-            print(answer_filepath)
-            export_list(out, answer_filepath)
-            if reasoning is not None:
-                answer_reasoning_filepath.parent.mkdir(parents=True, exist_ok=True)
-                print(answer_reasoning_filepath)
-                export_list(reasoning, answer_reasoning_filepath)
-        generated_answer = import_list(answer_filepath)
-        generated_answers.append(generated_answer)
+                generated_answers[q] = future.result()
+            except Exception as exc:
+                print(f'Question {q} generated an exception: {exc}')
+                # Fallback to sequential processing if parallel fails for this item
+                generated_answers[q] = process_func(q)
 
     df_generated_answers = pd.concat([df_qa, pd.DataFrame({'llm_answer':generated_answers})], axis = 1)
 
@@ -167,6 +275,49 @@ def extract_chapter_number(s):
     else:
         raise ValueError("String does not match the expected format")
 
+def process_single_evaluation(q, df_qa2, nb_chapters, nb_tokens, data_folder, prompt_parameters, 
+                             model_parameters, book_parameters, answering_parameters, split_chapters, 
+                             env_file):
+    model_name = model_parameters['model_name']
+    config = SettingsWrapper(_env_file = env_file)
+    
+    # Skip this question if it doesn't have an answer
+    if df_qa2.iloc[q]['llm_answer'] is None:
+        return None
+
+    evaluate_filepath = evaluate_filepath_func(q, nb_chapters, nb_tokens, data_folder, prompt_parameters, model_parameters, book_parameters, answering_parameters)
+    
+    if not evaluate_filepath.is_file():
+        question = df_qa2.iloc[q]['question'] # just for the printing
+        llm_answer = df_qa2.iloc[q]['llm_answer']
+        correct_answer = df_qa2.iloc[q]['correct_answer']
+        retrieval_type = df_qa2.iloc[q]['retrieval_type']
+        get_style = df_qa2.iloc[q]['get']
+        
+        with print_lock:
+            print(f"Evaluate {str(q)} / {str(len(df_qa2)-1)} [question {question}]")
+        
+        # Initialize model for this worker
+        my_model = ModelsWrapper(model_name, config)
+
+        # update the answer for full events
+        if len(correct_answer) == 1:
+            if is_valid_chapter_string(correct_answer[0]):
+                chapter_number = extract_chapter_number(correct_answer[0])
+                correct_answer_long = split_chapters[chapter_number] # does not need to be a list in this case
+            else:
+                correct_answer_long = None
+        else:
+            correct_answer_long = None
+
+        # generate the content
+        out = evaluate_answer(llm_answer, correct_answer, retrieval_type, my_model, correct_answer_long, get_style)
+        evaluate_filepath.parent.mkdir(parents=True, exist_ok=True)
+        export_list(out, evaluate_filepath)
+    
+    generated_evaluation = import_list(evaluate_filepath)
+    return generated_evaluation
+
 def generate_evaluation_func(
     my_benchmark: BenchmarkGenerationWrapper,
     df_generated_answers,
@@ -182,6 +333,7 @@ def generate_evaluation_func(
     model_name = model_parameters['model_name'] # using the model that built the benchmark, not the one answering the questions
     
     config = SettingsWrapper(_env_file = env_file)
+    max_workers = config.MAX_WORKERS  # Get max_workers from settings
 
     nb_chapters = my_benchmark.nb_chapters()
     nb_tokens = my_benchmark.nb_tokens()
@@ -198,54 +350,91 @@ def generate_evaluation_func(
 
     # question/true answer and additionally containing the generated answers
     df_qa2 = df_generated_answers
-    generated_evaluations = []
-
-    # loop
-    for q in range(len(df_qa2)):
-        evaluate_filepath = evaluate_filepath_func(q, nb_chapters, nb_tokens, data_folder, prompt_parameters, model_parameters, book_parameters, answering_parameters)
-        if not evaluate_filepath.is_file():
-            question = df_qa2.iloc[q]['question'] # just for the printing
-            llm_answer = df_qa2.iloc[q]['llm_answer']
-            correct_answer = df_qa2.iloc[q]['correct_answer']
-            retrieval_type = df_qa2.iloc[q]['retrieval_type']
-            get_style = df_qa2.iloc[q]['get']
-            print(f"Evaluate {str(q)} / {str(len(df_qa2)-1)} [question {question}]")
-            # only initialize the model if needed, and only initialize it once 
-            try:
-                my_model
-            except NameError:
-                my_model = ModelsWrapper(model_name, config)
-
-            # update the answer for full events
-            if len(correct_answer) == 1:
-                #print(correct_answer[0])
-                if is_valid_chapter_string(correct_answer[0]):
-                    #print('need to change with actual chapter')
-                    chapter_number = extract_chapter_number(correct_answer[0])
-                    #print(chapter_number)
-                    correct_answer_long = split_chapters[chapter_number] # does not need to be a list in this case
-                    #print("[begin book chapter]")
-                    #print(correct_answer_long)
-                    #print("[end book chapter]")
-                else:
-                    correct_answer_long = None
-            else:
-                correct_answer_long = None
-
-            # generate the content
-            out = evaluate_answer(llm_answer, correct_answer, retrieval_type, my_model, correct_answer_long, get_style)
-            evaluate_filepath.parent.mkdir(parents=True, exist_ok=True)
-            #print(evaluate_filepath)
-            export_list(out, evaluate_filepath)
-        generated_evaluation = import_list(evaluate_filepath)
-        generated_evaluations.append(generated_evaluation)
-
-    #df_generated_answers = pd.concat([df_qa2, pd.DataFrame({'llm_answer':generated_answers})], axis = 1)
+    
+    # Create a lock for thread-safe printing
+    global print_lock
+    print_lock = threading.Lock()
+    
+    # Create a partial function with fixed parameters
+    process_func = partial(
+        process_single_evaluation,
+        df_qa2=df_qa2,
+        nb_chapters=nb_chapters,
+        nb_tokens=nb_tokens,
+        data_folder=data_folder,
+        prompt_parameters=prompt_parameters,
+        model_parameters=model_parameters,
+        book_parameters=book_parameters,
+        answering_parameters=answering_parameters,
+        split_chapters=split_chapters,
+        env_file=env_file
+    )
+    
+    # Run with parallel workers - only process questions that have answers
+    generated_evaluations = [None] * len(df_qa2)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Submit tasks only for questions with answers
+        future_to_index = {}
+        for q in range(len(df_qa2)):
+            if df_qa2.iloc[q]['llm_answer'] is not None:
+                future_to_index[executor.submit(process_func, q)] = q
         
-    df_generated_evaluations = pd.DataFrame(generated_evaluations)
-    df_generated_evaluations = pd.concat([df_qa2, df_generated_evaluations], axis = 1)
+        # Process results as they complete
+        for future in concurrent.futures.as_completed(future_to_index):
+            q = future_to_index[future]
+            try:
+                generated_evaluations[q] = future.result()
+            except Exception as exc:
+                with print_lock:
+                    print(f'Evaluation {q} generated an exception: {exc}')
+                # Fallback to sequential processing if parallel fails for this item
+                generated_evaluations[q] = process_func(q)
+    
+    # Filter out None values before creating DataFrame
+    valid_indices = [i for i, x in enumerate(generated_evaluations) if x is not None]
+    valid_evaluations = [generated_evaluations[i] for i in valid_indices]
+    
+    # Create a DataFrame with only the valid evaluations
+    df_valid_evals = pd.DataFrame(valid_evaluations)
+    
+    # Get the corresponding rows from df_qa2
+    df_valid_qa2 = df_qa2.iloc[valid_indices].reset_index(drop=True)
+    
+    # Combine the dataframes
+    df_generated_evaluations = pd.concat([df_valid_qa2, df_valid_evals], axis=1)
 
     return df_generated_evaluations
+
+def process_single_chronological(q, df_qa3, nb_chapters, nb_tokens, data_folder, prompt_parameters, 
+                                model_parameters, book_parameters, answering_parameters, env_file):
+    model_name = model_parameters['model_name']
+    config = SettingsWrapper(_env_file = env_file)
+    
+    # Skip non-chronological questions or those without predicted items
+    if df_qa3.iloc[q]['get'] != 'chronological' or 'predicted_items' not in df_qa3.columns or df_qa3.iloc[q]['predicted_items'] is None:
+        return None
+        
+    chronological_filepath = chronological_filepath_func(q, nb_chapters, nb_tokens, data_folder, prompt_parameters, 
+                                                       model_parameters, book_parameters, answering_parameters)
+
+    if not chronological_filepath.is_file():
+        predicted_items = df_qa3.iloc[q]['predicted_items']
+        groundtruth_items = df_qa3.iloc[q]['groundtruth_items']
+        question = df_qa3.iloc[q]['question']
+        
+        with print_lock:
+            print(f"Evaluate {str(q)} / {str(len(df_qa3)-1)} [question {question}]")
+        
+        # Initialize model for this worker
+        my_model = ModelsWrapper(model_name, config)
+
+        # Generate the content
+        out = evaluate_chronological(groundtruth_items, predicted_items, my_model)
+        chronological_filepath.parent.mkdir(parents=True, exist_ok=True)
+        export_list(out, chronological_filepath)
+        
+    generated_chronological = import_list(chronological_filepath)
+    return generated_chronological
 
 def generate_chronological_func(
     my_benchmark: BenchmarkGenerationWrapper,
@@ -262,40 +451,62 @@ def generate_chronological_func(
     model_name = model_parameters['model_name'] # using the model that built the benchmark, not the one answering the questions
     
     config = SettingsWrapper(_env_file = env_file)
+    max_workers = config.MAX_WORKERS  # Get max_workers from settings
 
     nb_chapters = my_benchmark.nb_chapters()
     nb_tokens = my_benchmark.nb_tokens()
 
     df_qa3 = df_generated_evaluations
-
+    
+    # Create a lock for thread-safe printing
+    global print_lock
+    print_lock = threading.Lock()
+    
+    # Find chronological questions first and ensure they have answers
+    chronological_indices = [q for q in range(len(df_qa3)) 
+                             if df_qa3.iloc[q]['get'] == 'chronological' 
+                             and 'predicted_items' in df_qa3.columns 
+                             and df_qa3.iloc[q]['predicted_items'] is not None]
+    
+    if not chronological_indices:
+        return pd.DataFrame([])  # Return empty DataFrame if no chronological questions
+    
+    # Create a partial function with fixed parameters
+    process_func = partial(
+        process_single_chronological,
+        df_qa3=df_qa3,
+        nb_chapters=nb_chapters,
+        nb_tokens=nb_tokens,
+        data_folder=data_folder,
+        prompt_parameters=prompt_parameters,
+        model_parameters=model_parameters,
+        book_parameters=book_parameters,
+        answering_parameters=answering_parameters,
+        env_file=env_file
+    )
+    
+    # Run with parallel workers
     generated_chronologicals = []
-
-    # loop
-    for q in range(len(df_qa3)):
-        if df_qa3.iloc[q]['get'] == 'chronological': # only consider the chronological questions
-            chronological_filepath = chronological_filepath_func(q, nb_chapters, nb_tokens, data_folder, prompt_parameters, model_parameters, book_parameters, answering_parameters)
-
-            if not chronological_filepath.is_file():
-                predicted_items = df_qa3.iloc[q]['predicted_items']
-                groundtruth_items = df_qa3.iloc[q]['groundtruth_items']
-                question = df_qa3.iloc[q]['question'] # just for the printing
-                print(f"Evaluate {str(q)} / {str(len(df_qa3)-1)} [question {question}]")
-                # only initialize the model if needed, and only initialize it once 
-                try:
-                    my_model
-                except NameError:
-                    my_model = ModelsWrapper(model_name, config)
-
-                # generate the content
-                out = evaluate_chronological(groundtruth_items, predicted_items, my_model)
-                chronological_filepath.parent.mkdir(parents=True, exist_ok=True)
-                #print(evaluate_filepath)
-                export_list(out, chronological_filepath)
-            generated_chronological = import_list(chronological_filepath)
-            generated_chronologicals.append(generated_chronological)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Submit only chronological tasks with answers
+        future_to_index = {executor.submit(process_func, q): q for q in chronological_indices}
+        
+        # Process results as they complete
+        for future in concurrent.futures.as_completed(future_to_index):
+            q = future_to_index[future]
+            try:
+                result = future.result()
+                if result is not None:
+                    generated_chronologicals.append(result)
+            except Exception as exc:
+                with print_lock:
+                    print(f'Chronological evaluation {q} generated an exception: {exc}')
+                # Fallback to sequential processing if parallel fails for this item
+                result = process_func(q)
+                if result is not None:
+                    generated_chronologicals.append(result)
 
     df_generated_chronological = pd.DataFrame(generated_chronologicals)
-
     return df_generated_chronological
 
 

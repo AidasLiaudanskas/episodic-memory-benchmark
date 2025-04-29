@@ -188,6 +188,20 @@ class BenchmarkGenerationWrapper:
 
         return book, df_book_groundtruth, df_qa, df_qa_debug_widespreadness, debug_all_generated_samples
 
+    # ADDED: Method to get the benchmark's output directory path
+    def get_benchmark_dirpath(self):
+        """Returns the directory path for this specific benchmark instance."""
+        nb_chapters = self.nb_chapters()
+        nb_tokens = self.nb_tokens()
+        return book_dirpath_func(
+            nb_chapters, 
+            nb_tokens, 
+            self.data_folder, 
+            self.prompt_parameters, 
+            self.model_parameters, 
+            self.book_parameters
+        )
+
     ## Related to `df_book_groundtruth`
     def get_df_book_groundtruth(self):
         return self.df_book_groundtruth
@@ -449,11 +463,11 @@ class BenchmarkGenerationWrapper:
 
         pos_t_paragraph, pos_s_paragraph, pos_e_paragraph, pos_c_paragraph = self.relative_position_within_paragraph()
 
-        filepath = Path(plot_folder) / f'appendix_ecdf_cue_relative_book__{self.model_parameters['model_name']}.pdf'
+        filepath = Path(plot_folder) / f"appendix_ecdf_cue_relative_book__{self.model_parameters['model_name']}.pdf"
         plotting_ecdf(pos_t_book, pos_s_book, pos_e_book, pos_c_book, filepath, xtitle = 'Relative position of the cue within the book')
 
-        filepath = Path(plot_folder) / f'appendix_ecdf_cue_relative_chapter__{self.model_parameters['model_name']}.pdf'
-        plotting_ecdf(pos_t_chapter, pos_s_chapter, pos_e_chapter, pos_c_chapter, filepath, xtitle = 'Relative position of the cue within the chapter')
+        filepath = Path(plot_folder) / f"appendix_ecdf_cue_relative_chapter__{self.model_parameters['model_name']}.pdf"
+        plotting_ecdf(pos_t_chapter, pos_s_chapter, pos_e_chapter, pos_c_chapter, filepath, xtitle = "Relative position of the cue within the chapter")
 
-        filepath = Path(plot_folder) / f'appendix_ecdf_cue_relative_paragraph__{self.model_parameters['model_name']}.pdf'
-        plotting_ecdf(pos_t_paragraph, pos_s_paragraph, pos_e_paragraph, pos_c_paragraph, filepath, xtitle = 'Relative position of the cue within the paragraph')
+        filepath = Path(plot_folder) / f"appendix_ecdf_cue_relative_paragraph__{self.model_parameters['model_name']}.pdf"
+        plotting_ecdf(pos_t_paragraph, pos_s_paragraph, pos_e_paragraph, pos_c_paragraph, filepath, xtitle = "Relative position of the cue within the paragraph")
