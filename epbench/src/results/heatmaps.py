@@ -43,14 +43,15 @@ def get_short_name2(tuple_input):
     if tuple_input[0] == 'prompting':
         output = model_name
     elif tuple_input[0] == 'rag':
-        if tuple_input[2] == 'chapter':
-            output = f"{model_name}\n(rag, {tuple_input[2]})"
-        else: 
-            output = f"{model_name}\n(rag)"
+        # Always include specific rag type (chapter, paragraph, etc.)
+        output = f"{model_name}\n(rag, {tuple_input[2]})"
     elif tuple_input[0] == 'ftuning':
         output = f"{model_name}\n(ftuning)"
     elif tuple_input[0] == 'graphrag':
         output = f"{model_name}\n(graphrag)"
+    else:
+        # Handle cases where tuple_input[0] is not recognized
+        raise ValueError(f"Unknown method type: {tuple_input[0]} for model {model_name}")
     return output
 
 def plot_clust(df, nb_events, relative_to, figsize=(16, 20), only_bins = None):
@@ -85,7 +86,10 @@ def plot_clust(df, nb_events, relative_to, figsize=(16, 20), only_bins = None):
         available_columns = ['get', 'bins_items_correct_answer', 'cue']
         # Add model columns in preferred order
         model_columns = [
-            'gpt-4o-mini', 'gpt-4o-mini (graphrag)',
+            'gpt-4o-mini',
+            'gpt-4o-mini\n(rag, chapter)',
+            'gpt-4o-mini\n(rag, paragraph)',
+            'gpt-4o-mini\n(graphrag)',
         ]
         # model_columns = [
         #     'gpt-4o', 'gpt-4.1',
