@@ -17,6 +17,8 @@ def get_short_name2(tuple_input):
         model_name = 'gpt-4o-mini'
     elif 'gpt-4o' in tuple_input[1]:
         model_name = 'gpt-4o'
+    elif 'gpt-4.1' in tuple_input[1]:
+        model_name = 'gpt-4.1'
     elif 'claude-3-5-sonnet' in tuple_input[1]:
         model_name = 'cl-3.5-sonnet'
     elif 'claude-3-haiku' in tuple_input[1]:
@@ -25,10 +27,18 @@ def get_short_name2(tuple_input):
         model_name = 'o1-mini'
     elif 'o1-preview' in tuple_input[1]:
         model_name = 'o1-preview'
-    elif 'llama' in tuple_input[1]:
+    elif 'llama-4-scout' in tuple_input[1]:
+        model_name = 'llama-4-scout'
+    elif 'llama-4-maverick' in tuple_input[1]:
+        model_name = 'llama-4-maverick'
+    elif 'llama-3' in tuple_input[1]:
         model_name = 'llama-3.1'
+    elif 'gemini-2' in tuple_input[1]:
+        model_name = 'gemini-2.5'
+    elif 'gpt-4.1' in tuple_input[1]:
+        model_name = 'gpt-4.1'
     else:
-        raise ValueError('unknown model')
+        raise ValueError(f'unknown model, {tuple_input[1]}')
     
     if tuple_input[0] == 'prompting':
         output = model_name
@@ -69,11 +79,21 @@ def plot_clust(df, nb_events, relative_to, figsize=(16, 20), only_bins = None):
         
         print(data.columns)
 
-        data = data[['get', 'bins_items_correct_answer', 'cue', 
-                    'gpt-4o', 'cl-3.5-sonnet\n(rag)', 'gpt-4o\n(rag)',
-                    'gpt-4o-mini\n(rag)', 'cl-3-haiku\n(rag)', 'llama-3.1',
-                    'cl-3-haiku', 'gpt-4o-mini',
-                    'cl-3.5-sonnet', 'gpt-4o-mini\n(ftuning)', 'o1-mini']]
+        # List of all available columns
+        available_columns = ['get', 'bins_items_correct_answer', 'cue']
+        # Add model columns in preferred order
+        model_columns = [
+            'gpt-4o', 'gpt-4.1',
+            'llama-4-scout', 'llama-4-maverick',
+            'gemini-2.5'
+        ]
+        
+        # Filter to only include columns that exist in the data
+        existing_model_columns = [col for col in model_columns if col in data.columns]
+        columns_to_use = available_columns + existing_model_columns
+        
+        # Select only columns that exist in the data
+        data = data[columns_to_use]
 
         # data.index = data.apply(lambda row: (row[relative_to]), axis=1)
         data.index = data['cue']

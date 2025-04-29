@@ -29,7 +29,7 @@ def generate_paragraphs_func(
         iterations = [0]*prompt_parameters['nb_events']
 
     generated_paragraphs = []
-    for event_index in range(len(prompts)):
+    for event_index in range(min(len(iterations), len(prompts))):
         user_prompt = prompts[event_index]
         iteration = iterations[event_index]
         data_paragraphs_filepath = paragraph_filepath_func(iteration, event_index, data_folder, prompt_parameters, model_parameters)
